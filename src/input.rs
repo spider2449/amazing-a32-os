@@ -9,7 +9,13 @@ use std::time::Duration;
 /// the code and the value.
 pub const EVENT_LEN: usize = 16;
 
+const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
+const EV_ABS: u16 = 3;
+const SYN_REPORT: u16 = 0;
+const BTN_TOUCH: u16 = 330;
+const ABS_MT_POSITION_X: u16 = 0x35;
+const ABS_MT_POSITION_Y: u16 = 0x36;
 const KEY_POWER: u16 = 116;
 const KEY_RELEASED: i32 = 0;
 const KEY_PRESSED: i32 = 1;
@@ -28,11 +34,41 @@ pub enum PowerKeyEvent {
     Released,
 }
 
+/// Splits a raw input event into its type, code and value.
+fn decode(raw: &[u8; EVENT_LEN]) -> (u16, u16, i32) {
+    (
+        u16::from_ne_bytes([raw[8], raw[9]]),
+        u16::from_ne_bytes([raw[10], raw[11]]),
+        i32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]),
+    )
+}
+
+/// Tracks the touch screen. With several fingers, it follows the last one reported.
+#[derive(Default)]
+pub struct Touch {
+    x: i32,
+    y: i32,
+    down: bool,
+}
+
+impl Touch {
+    /// Applies a raw event. At the end of each report it returns the touched
+    /// position, or `Some(None)` when nothing touches the screen.
+    pub fn event(&mut self, raw: &[u8; EVENT_LEN]) -> Option<Option<(i32, i32)>> {
+        match decode(raw) {
+            (EV_ABS, ABS_MT_POSITION_X, value) => self.x = value,
+            (EV_ABS, ABS_MT_POSITION_Y, value) => self.y = value,
+            (EV_KEY, BTN_TOUCH, value) => self.down = value != 0,
+            (EV_SYN, SYN_REPORT, _) => return Some(self.down.then_some((self.x, self.y))),
+            _ => {}
+        }
+        None
+    }
+}
+
 /// Decodes a raw input event. Other keys, event types and auto-repeat are `None`.
 pub fn parse_event(raw: &[u8; EVENT_LEN]) -> Option<PowerKeyEvent> {
-    let kind = u16::from_ne_bytes([raw[8], raw[9]]);
-    let code = u16::from_ne_bytes([raw[10], raw[11]]);
-    let value = i32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]);
+    let (kind, code, value) = decode(raw);
     if kind != EV_KEY || code != KEY_POWER {
         return None;
     }
@@ -94,6 +130,21 @@ mod tests {
         event[10..12].copy_from_slice(&code.to_ne_bytes());
         event[12..16].copy_from_slice(&value.to_ne_bytes());
         event
+    }
+
+    #[test]
+    fn touch_reports_position_then_release() {
+        let mut touch = Touch::default();
+        assert_eq!(touch.event(&raw(1, 330, 1)), None);
+        assert_eq!(touch.event(&raw(3, 0x35, 120)), None);
+        assert_eq!(touch.event(&raw(3, 0x36, 640)), None);
+        assert_eq!(touch.event(&raw(0, 0, 0)), Some(Some((120, 640))));
+
+        assert_eq!(touch.event(&raw(3, 0x35, 130)), None);
+        assert_eq!(touch.event(&raw(0, 0, 0)), Some(Some((130, 640))));
+
+        assert_eq!(touch.event(&raw(1, 330, 0)), None);
+        assert_eq!(touch.event(&raw(0, 0, 0)), Some(None));
     }
 
     #[test]

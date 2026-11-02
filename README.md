@@ -166,6 +166,48 @@ Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
 A short press turns the backlight off or on. Holding the key for 3 seconds powers
 the phone off. Without USB it stays off until the key starts it again.
 
+## Touch screen
+
+The status screen draws a cross at the touched position and shows its coordinates.
+The top left corner read `4,4` and the bottom right read `476,850`, so the
+coordinates match the 480x854 display without calibration.
+
+Open problems:
+
+- The cross lags behind the finger. The cause has not been measured.
+- `/dev/touch` was missing on one boot. Six later boots were fine, and each found
+  the device at once, so the retry added since then is not proven to be the fix.
+  `/run/init.log` now keeps the reason if it happens again.
+
+## Wi-Fi
+
+Wi-Fi scanning works from a RAM boot, using the stock programs and firmware from
+the read-only `/system`. One scan found 24 networks. Connecting has not been
+tested, and the steps below are manual: the init does not run them yet.
+
+1. Point the kernel at the firmware: write `/system/vendor/firmware` to
+   `/sys/module/firmware_class/parameters/path`. This was set while testing, but
+   whether it is required has not been checked.
+2. Create `/dev/wmtdetect`, `/dev/btif` and `/dev/ttyMT2` from `/sys/dev/char`.
+3. Run `wmt_loader`, then create `/dev/stpwmt` and `/dev/wmtWifi` the same way.
+4. Run `wmt_launcher -p /vendor/firmware/`, then write `1` to `/dev/wmtWifi`.
+   `wlan0` appears.
+5. Run `ip link set wlan0 up`, then `wpa_supplicant`.
+
+Requirements found on the way, which other devices may share:
+
+- `wmt_launcher` waits for the property `service.wcn.driver.ready`, normally set
+  through a property service. Without it the kernel reports `no hif info!`. The
+  init provides it in a read-only `/dev/__properties__`, in the Android 7.0 format.
+- Android's `wpa_supplicant` drops to uid 1010, then exits with status 255 and no
+  output if it cannot create its control socket. Its directory and
+  `/data/misc/wifi/sockets` must belong to that user.
+
+`/data` is not mounted, so the MAC address `00:08:22:80:06:fc` may be a default
+instead of this phone's own address.
+
+The `sh LINE` console command runs a line with the stock shell.
+
 ## Power off and charging
 
 With USB attached, a powered-off phone starts by itself in charger mode. The USB

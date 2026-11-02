@@ -138,7 +138,7 @@ impl Canvas {
     }
 
     /// Redraws the whole status screen.
-    pub fn render_status(&mut self, lines: &[String]) {
+    pub fn render_status(&mut self, lines: &[String], touch: Option<(i32, i32)>) {
         let (width, height) = (self.format.width, self.format.height);
         self.fill_rect(0, 0, width, height, BACKGROUND);
 
@@ -156,8 +156,20 @@ impl Canvas {
         for (index, line) in lines.iter().enumerate() {
             self.draw_text(32, 360 + index as u32 * 48, 3, line, FOREGROUND);
         }
+
+        if let Some((x, y)) = touch {
+            let (x, y) = (x.max(0) as u32, y.max(0) as u32);
+            let (left, top) = (x.saturating_sub(MARKER_REACH), y.saturating_sub(MARKER_REACH));
+            let length = MARKER_REACH * 2 + MARKER_WIDTH;
+            self.fill_rect(left, y, length, MARKER_WIDTH, ACCENT);
+            self.fill_rect(x, top, MARKER_WIDTH, length, ACCENT);
+        }
     }
 }
+
+// The size of the cross drawn where the screen is touched.
+const MARKER_REACH: u32 = 40;
+const MARKER_WIDTH: u32 = 4;
 
 /// Formats the live status lines from raw kernel values.
 pub fn status_lines(
@@ -165,6 +177,7 @@ pub fn status_lines(
     capacity: Option<&str>,
     status: Option<&str>,
     boot_mode: Option<&str>,
+    touch: Option<(i32, i32)>,
 ) -> Vec<String> {
     let seconds = uptime
         .split_whitespace()
@@ -184,6 +197,7 @@ pub fn status_lines(
             status.map_or("UNKNOWN", str::trim)
         ),
         format!("MODE {}", boot_mode.map_or("?", str::trim)),
+        touch.map_or("TOUCH -".to_string(), |(x, y)| format!("TOUCH {x} {y}")),
     ]
 }
 
@@ -301,7 +315,8 @@ mod tests {
     #[test]
     fn status_screen_shows_all_three_color_bars() {
         let mut canvas = Canvas::new(rgba8888());
-        canvas.render_status(&status_lines("5.0 1.0", Some("50"), Some("Charging"), Some("0")));
+        let lines = status_lines("5.0 1.0", Some("50"), Some("Charging"), Some("0"), None);
+        canvas.render_status(&lines, None);
         assert_eq!(pixel(&canvas, 10, 230), [255, 0, 0, 255]);
         assert_eq!(pixel(&canvas, 170, 230), [0, 255, 0, 255]);
         assert_eq!(pixel(&canvas, 470, 230), [0, 0, 255, 255]);
@@ -324,13 +339,32 @@ mod tests {
     #[test]
     fn formats_status_lines() {
         assert_eq!(
-            status_lines("3725.40 99.0\n", Some("62\n"), Some("Charging\n"), Some("9\n")),
-            vec!["UP 01:02:05", "BAT 62% Charging", "MODE 9"]
+            status_lines(
+                "3725.40 99.0\n",
+                Some("62\n"),
+                Some("Charging\n"),
+                Some("9\n"),
+                Some((120, 640))
+            ),
+            vec!["UP 01:02:05", "BAT 62% Charging", "MODE 9", "TOUCH 120 640"]
         );
         assert_eq!(
-            status_lines("garbage", None, None, None),
-            vec!["UP 00:00:00", "BAT ?% UNKNOWN", "MODE ?"]
+            status_lines("garbage", None, None, None, None),
+            vec!["UP 00:00:00", "BAT ?% UNKNOWN", "MODE ?", "TOUCH -"]
         );
+    }
+
+    #[test]
+    fn touch_marker_is_drawn_and_clipped_at_the_edges() {
+        let mut canvas = Canvas::new(rgba8888());
+        canvas.render_status(&[], Some((240, 700)));
+        assert_eq!(pixel(&canvas, 220, 701), [ACCENT.0, ACCENT.1, ACCENT.2, 255]);
+        assert_eq!(pixel(&canvas, 241, 680), [ACCENT.0, ACCENT.1, ACCENT.2, 255]);
+        assert_eq!(pixel(&canvas, 300, 701), [12, 18, 28, 255]);
+
+        for corner in [(-5, -5), (479, 853), (5000, 5000)] {
+            canvas.render_status(&[], Some(corner));
+        }
     }
 
     #[test]

@@ -14,7 +14,8 @@ const HELP: &str = "commands:
   dump PATH OFFSET LENGTH      print a file range as base64
   reboot [bootloader|recovery] restart the phone
   reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
-  poweroff [SECONDS]           turn the phone off, optionally after a delay
+  sh LINE                      run a line with the stock shell in /system
+  poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
 /// Operations that need the real kernel, abstracted for host testing.
@@ -24,6 +25,8 @@ pub trait Platform {
     fn reboot(&self, target: Option<&str>) -> io::Error;
     /// Only returns if the power off request failed.
     fn power_off(&self) -> io::Error;
+    /// Runs a line with the phone's stock shell and returns its output.
+    fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>>;
 }
 
 /// Serves commands until the input ends.
@@ -61,6 +64,10 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
             }
             Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
         },
+        ["sh", _, ..] => {
+            let rest = line.strip_prefix("sh").unwrap_or(line).trim();
+            platform.run_stock_shell(rest).and_then(|output| out.write_all(&output))
+        }
         ["poweroff"] => Err(platform.power_off()),
         ["poweroff", delay] => match delay.parse() {
             // Blocking the console is fine: the delay exists to unplug USB.
@@ -116,6 +123,10 @@ mod tests {
         fn power_off(&self) -> io::Error {
             io::Error::other("fake power off")
         }
+
+        fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>> {
+            Ok(format!("ran [{line}]\n").into_bytes())
+        }
     }
 
     fn session(input: &str) -> (String, Vec<Option<String>>) {
@@ -143,6 +154,12 @@ mod tests {
         let (out, _) = session("cat /no/such/file\nhelp\n");
         assert!(out.contains("error:"));
         assert!(out.contains("commands:"));
+    }
+
+    #[test]
+    fn sh_passes_the_rest_of_the_line_unchanged() {
+        assert!(session("sh echo  'a b' > /x\n").0.contains("ran [echo  'a b' > /x]"));
+        assert!(session("sh\n").0.contains("unknown command"));
     }
 
     #[test]

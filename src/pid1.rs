@@ -10,17 +10,20 @@
 
 use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
-use crate::input::{self, Action, PowerKey, EVENT_LEN};
+use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::usb;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,7 +59,7 @@ const SERIAL_DEVICE: &str = "/dev/ttyGS0";
 // Partitions exposed as /dev/NAME so that the console can back them up. Nothing
 // in this system writes to them.
 const SYS_BLOCK: &str = "/sys/class/block";
-const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery"];
+const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery", "system"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
 // Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
 const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
@@ -64,6 +67,25 @@ const SYS_INPUT: &str = "/sys/class/input";
 // The kernel's keypad device, which reports the power and volume keys.
 const KEYPAD_NAME: &str = "mtk-kpd";
 const KEYPAD_DEVICE: &str = "/dev/keypad";
+// An exact name, because `mtk-tpd-kpd` is a separate device for the touch keys.
+const TOUCH_NAME: &str = "mtk-tpd";
+const TOUCH_DEVICE: &str = "/dev/touch";
+const TOUCH_WAIT_SECONDS: u32 = 30;
+// A copy of this process's log. The kernel log soon overwrites old lines,
+// because the USB driver logs every transfer.
+const INIT_LOG: &str = "/run/init.log";
+const STOCK_SHELL: &str = "/system/bin/sh";
+const STOCK_SHELL_OUTPUT: &str = "/run/stock-shell-output";
+const STOCK_PATH: &str = "/system/bin:/system/xbin:/system/vendor/bin";
+const PROPERTY_AREA: &str = "/dev/__properties__";
+// `wmt_loader` cannot set this one itself without a property service, and
+// `wmt_launcher` appears to wait for it.
+const STOCK_PROPERTIES: &[(&str, &str)] = &[("service.wcn.driver.ready", "yes")];
+const ECHILD: i32 = 10;
+const MS_RDONLY: c_ulong = 1;
+// `noload` skips the ext4 journal, because replaying it would write to the
+// partition even for a read-only mount.
+const SYSTEM_MOUNT_OPTIONS: &str = "noload";
 const BOOT_MODE: &str = "/sys/class/BOOT/BOOT/boot/boot_mode";
 // MediaTek's KERNEL_POWER_OFF_CHARGING: USB was plugged into a powered-off phone.
 // The console never appears in this mode, so it would leave no way to fastboot.
@@ -120,6 +142,9 @@ const DEVICES: &[(&str, u32, u32, c_uint)] = &[
     ("/dev/null", 1, 3, 0o666),
     ("/dev/kmsg", 1, 11, 0o600),
     ("/dev/console", 5, 1, 0o600),
+    ("/dev/zero", 1, 5, 0o666),
+    ("/dev/random", 1, 8, 0o666),
+    ("/dev/urandom", 1, 9, 0o666),
 ];
 
 /// Boots userspace. Never returns.
@@ -147,6 +172,12 @@ pub fn run() -> ! {
     }
     if let Err(err) = make_partition_devices() {
         errors.push(format!("partition devices failed: {err}"));
+    }
+    if let Err(err) = mount_system() {
+        errors.push(format!("mount /system failed: {err}"));
+    }
+    if let Err(err) = write_property_area() {
+        errors.push(format!("property area failed: {err}"));
     }
 
     for error in &errors {
@@ -220,20 +251,58 @@ fn run_status_screen() -> io::Result<()> {
     log(&info);
     let _ = fs::write(DISPLAY_INFO, info);
 
+    // `touches` stays alive here, so the receiver below never sees a disconnect
+    // even if the touch thread stops.
+    let (touches, touch_updates) = mpsc::channel();
+    let sender = touches.clone();
+    if let Err(err) = thread::Builder::new().spawn(move || touch_screen(sender)) {
+        log(&format!("touch thread failed: {err}"));
+    }
+
     let boot_mode = fs::read_to_string(BOOT_MODE).ok();
     let mut canvas = Canvas::new(format);
+    let mut touch = None;
     loop {
         let uptime = fs::read_to_string("/proc/uptime")?;
         let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
         let status = fs::read_to_string(BATTERY_STATUS).ok();
-        canvas.render_status(&status_lines(
+        let lines = status_lines(
             &uptime,
             capacity.as_deref(),
             status.as_deref(),
             boot_mode.as_deref(),
-        ));
+            touch,
+        );
+        canvas.render_status(&lines, touch);
         framebuffer.present(canvas.pixels())?;
-        thread::sleep(Duration::from_secs(1));
+
+        // Redraw when the touch changes, and otherwise once a second. Only the
+        // newest update matters if drawing fell behind.
+        if let Ok(update) = touch_updates.recv_timeout(Duration::from_secs(1)) {
+            touch = update;
+            touch = touch_updates.try_iter().last().unwrap_or(touch);
+        }
+    }
+}
+
+/// Sends touch updates to the status screen. A failure leaves the rest running.
+fn touch_screen(updates: mpsc::Sender<Option<(i32, i32)>>) {
+    if let Err(err) = run_touch_screen(&updates) {
+        log(&format!("touch stopped: {err}"));
+    }
+}
+
+fn run_touch_screen(updates: &mpsc::Sender<Option<(i32, i32)>>) -> io::Result<()> {
+    let (major, minor) = wait_for_touch_device()?;
+    make_char_device(TOUCH_DEVICE, major, minor, 0o600)?;
+    let mut device = File::open(TOUCH_DEVICE)?;
+    let mut touch = Touch::default();
+    loop {
+        let mut raw = [0u8; EVENT_LEN];
+        device.read_exact(&mut raw)?;
+        if let Some(update) = touch.event(&raw) {
+            updates.send(update).map_err(io::Error::other)?;
+        }
     }
 }
 
@@ -245,7 +314,7 @@ fn power_key() {
 }
 
 fn run_power_key() -> io::Result<()> {
-    let (major, minor) = find_keypad()?;
+    let (major, minor) = find_input_device(KEYPAD_NAME)?;
     make_char_device(KEYPAD_DEVICE, major, minor, 0o600)?;
     let mut device = File::open(KEYPAD_DEVICE)?;
 
@@ -279,20 +348,35 @@ fn run_power_key() -> io::Result<()> {
     }
 }
 
-fn find_keypad() -> io::Result<(u32, u32)> {
+/// The touch driver can register after this process starts, so a missing device
+/// is only an error once the wait is over.
+fn wait_for_touch_device() -> io::Result<(u32, u32)> {
+    for attempt in 0..TOUCH_WAIT_SECONDS {
+        match find_input_device(TOUCH_NAME) {
+            Ok(device) => {
+                log(&format!("touch device found after {attempt} s"));
+                return Ok(device);
+            }
+            Err(_) => thread::sleep(Duration::from_secs(1)),
+        }
+    }
+    find_input_device(TOUCH_NAME)
+}
+
+fn find_input_device(wanted: &str) -> io::Result<(u32, u32)> {
     for entry in fs::read_dir(SYS_INPUT)? {
         let path = entry?.path();
-        let is_keypad = fs::read_to_string(path.join("device/name"))
-            .is_ok_and(|name| name.trim() == KEYPAD_NAME);
+        let matches = fs::read_to_string(path.join("device/name"))
+            .is_ok_and(|name| name.trim() == wanted);
         // `inputN` entries also match, but only `eventN` entries have `dev`.
-        if is_keypad {
+        if matches {
             if let Ok(dev) = fs::read_to_string(path.join("dev")) {
                 return usb::parse_dev(&dev)
                     .ok_or_else(|| io::Error::other(format!("bad device number: {dev}")));
             }
         }
     }
-    Err(io::Error::other(format!("{KEYPAD_NAME} not found")))
+    Err(io::Error::other(format!("{wanted} not found")))
 }
 
 /// Returns whether `file` has data before the timeout. `None` waits forever.
@@ -410,6 +494,26 @@ impl Platform for KernelPlatform {
         io::Error::last_os_error()
     }
 
+    fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>> {
+        // Output goes to a file instead of a pipe, so that a background program
+        // started by the line cannot keep this call waiting.
+        let output = File::create(STOCK_SHELL_OUTPUT)?;
+        let status = Command::new(STOCK_SHELL)
+            .args(["-c", line])
+            .env("PATH", STOCK_PATH)
+            .env("ANDROID_ROOT", "/system")
+            .env("ANDROID_DATA", "/data")
+            .stdin(Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output)
+            .status();
+        match status {
+            // `reap_forever` may collect the child first. It has exited either way.
+            Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
+            _ => fs::read(STOCK_SHELL_OUTPUT),
+        }
+    }
+
     fn power_off(&self) -> io::Error {
         // SAFETY: `sync` takes no arguments and has no memory safety requirements.
         unsafe { sync() };
@@ -434,6 +538,38 @@ fn mount_fs(fstype: &str, target: &str) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Writes the file bionic reads properties from. Bionic rejects it unless root
+/// owns it and only root can write to it.
+fn write_property_area() -> io::Result<()> {
+    let bytes = crate::properties::build_area(STOCK_PROPERTIES).map_err(io::Error::other)?;
+    fs::write(PROPERTY_AREA, bytes)?;
+    fs::set_permissions(PROPERTY_AREA, fs::Permissions::from_mode(0o444))
+}
+
+/// Mounts the stock system partition read-only, for its Wi-Fi programs and
+/// firmware. The rest of this system does not depend on it.
+fn mount_system() -> io::Result<()> {
+    fs::create_dir_all("/system")?;
+    let source = cstring("/dev/system")?;
+    let target = cstring("/system")?;
+    let fstype = cstring("ext4")?;
+    let options = cstring(SYSTEM_MOUNT_OPTIONS)?;
+    // SAFETY: all pointers are valid NUL-terminated strings for the call duration.
+    let rc = unsafe {
+        mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            MS_RDONLY,
+            options.as_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::os::unix::fs::symlink("/system/vendor", "/vendor")
 }
 
 /// Encodes a device number the same way as musl's `makedev`.
@@ -485,6 +621,13 @@ fn log(message: &str) {
     if let Ok(mut kmsg) = OpenOptions::new().write(true).open("/dev/kmsg") {
         for line in message.lines() {
             let _ = writeln!(kmsg, "a32-init: {line}");
+        }
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(INIT_LOG) {
+        let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
+        let seconds = uptime.split_whitespace().next().unwrap_or("?");
+        for line in message.lines() {
+            let _ = writeln!(file, "[{seconds}] {line}");
         }
     }
 }

@@ -4,6 +4,8 @@
 //! read-only device report, so the binary is safe to try under stock Android.
 
 mod probe;
+#[cfg(any(target_os = "linux", test))]
+mod properties;
 
 #[cfg(any(target_os = "linux", test))]
 mod display;
