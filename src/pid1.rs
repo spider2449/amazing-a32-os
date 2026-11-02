@@ -8,6 +8,7 @@
 //! does it. So if this process panics or the console cannot start, it reboots to
 //! fastboot, where the system can be repaired. A kernel panic is not covered.
 
+use crate::dhcp::{self, MessageType};
 use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
 use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
@@ -16,6 +17,7 @@ use crate::usb;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
+use std::net::{Ipv4Addr, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
@@ -25,7 +27,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[repr(C)]
 struct PollFd {
@@ -38,6 +40,13 @@ const POLLIN: c_short = 1;
 
 extern "C" {
     fn poll(fds: *mut PollFd, count: c_ulong, timeout_ms: c_int) -> c_int;
+    fn setsockopt(
+        socket: c_int,
+        level: c_int,
+        name: c_int,
+        value: *const c_void,
+        length: c_uint,
+    ) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -82,6 +91,13 @@ const PROPERTY_AREA: &str = "/dev/__properties__";
 // `wmt_launcher` appears to wait for it.
 const STOCK_PROPERTIES: &[(&str, &str)] = &[("service.wcn.driver.ready", "yes")];
 const ECHILD: i32 = 10;
+const STOCK_IP: &str = "/system/bin/ip";
+const SOL_SOCKET: c_int = 1;
+const SO_BINDTODEVICE: c_int = 25;
+const DHCP_CLIENT_PORT: u16 = 68;
+const DHCP_SERVER_PORT: u16 = 67;
+const DHCP_ATTEMPTS: u32 = 4;
+const DHCP_REPLY_WAIT: Duration = Duration::from_secs(3);
 const MS_RDONLY: c_ulong = 1;
 // `noload` skips the ext4 journal, because replaying it would write to the
 // partition even for a read-only mount.
@@ -514,12 +530,115 @@ impl Platform for KernelPlatform {
         }
     }
 
+    fn dhcp(&self, interface: &str) -> io::Result<String> {
+        let lease = acquire_lease(interface)?;
+        let netmask = lease.netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
+        let prefix = dhcp::prefix_length(netmask)
+            .ok_or_else(|| io::Error::other(format!("bad netmask: {netmask}")))?;
+
+        run_ip(&["addr", "flush", "dev", interface])?;
+        run_ip(&["addr", "add", &format!("{}/{prefix}", lease.address), "dev", interface])?;
+        if let Some(router) = lease.router {
+            run_ip(&["route", "replace", "default", "via", &router.to_string(), "dev", interface])?;
+        }
+        Ok(format!(
+            "address {}/{prefix} router {:?} dns {:?} lease {:?} s (not renewed)",
+            lease.address, lease.router, lease.dns, lease.lease_seconds
+        ))
+    }
+
     fn power_off(&self) -> io::Error {
         // SAFETY: `sync` takes no arguments and has no memory safety requirements.
         unsafe { sync() };
         // SAFETY: this reboot command takes no pointer arguments.
         unsafe { syscall(SYS_REBOOT, REBOOT_MAGIC1, REBOOT_MAGIC2, REBOOT_CMD_POWER_OFF, 0) };
         io::Error::last_os_error()
+    }
+}
+
+/// Runs the stock `ip` program with its output discarded.
+fn run_ip(arguments: &[&str]) -> io::Result<()> {
+    let status = Command::new(STOCK_IP)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if !status.success() => {
+            Err(io::Error::other(format!("ip {arguments:?} failed: {status}")))
+        }
+        // `reap_forever` may collect the child first, which hides its exit status.
+        Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Runs one DHCP exchange: Discover, Offer, Request, Ack.
+fn acquire_lease(interface: &str) -> io::Result<dhcp::Reply> {
+    let mac_text = fs::read_to_string(format!("/sys/class/net/{interface}/address"))?;
+    let mac = dhcp::parse_mac(&mac_text)
+        .ok_or_else(|| io::Error::other(format!("bad MAC address: {mac_text}")))?;
+
+    let socket = UdpSocket::bind(("0.0.0.0", DHCP_CLIENT_PORT))?;
+    socket.set_broadcast(true)?;
+    socket.set_read_timeout(Some(DHCP_REPLY_WAIT))?;
+    bind_to_device(&socket, interface)?;
+
+    let xid = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0x6132_0001, |elapsed| elapsed.subsec_nanos() ^ elapsed.as_secs() as u32);
+
+    let offer = exchange(&socket, &dhcp::build_message(xid, mac, None), xid, mac, MessageType::Offer)?;
+    let server = offer
+        .server
+        .ok_or_else(|| io::Error::other("offer has no server identifier"))?;
+    let request = dhcp::build_message(xid, mac, Some((offer.address, server)));
+    exchange(&socket, &request, xid, mac, MessageType::Ack)
+}
+
+/// Sends a message until the wanted reply arrives or the attempts run out.
+fn exchange(
+    socket: &UdpSocket,
+    message: &[u8],
+    xid: u32,
+    mac: [u8; 6],
+    wanted: MessageType,
+) -> io::Result<dhcp::Reply> {
+    let mut buffer = [0u8; 1500];
+    for _ in 0..DHCP_ATTEMPTS {
+        socket.send_to(message, ("255.255.255.255", DHCP_SERVER_PORT))?;
+        // A timeout ends this attempt. Unrelated packets keep it waiting for at
+        // most one more timeout each, which is fine for a manual command.
+        while let Ok((length, _)) = socket.recv_from(&mut buffer) {
+            match dhcp::parse_reply(&buffer[..length], xid, mac) {
+                Some(reply) if reply.kind == wanted => return Ok(reply),
+                Some(reply) if reply.kind == MessageType::Nak => {
+                    return Err(io::Error::other("server refused the request"));
+                }
+                _ => {}
+            }
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::TimedOut, format!("no DHCP {wanted:?} received")))
+}
+
+fn bind_to_device(socket: &UdpSocket, interface: &str) -> io::Result<()> {
+    // SAFETY: the pointer and length describe `interface` for the call duration,
+    // and the kernel only reads from it.
+    let rc = unsafe {
+        setsockopt(
+            socket.as_raw_fd(),
+            SOL_SOCKET,
+            SO_BINDTODEVICE,
+            interface.as_ptr().cast(),
+            interface.len() as c_uint,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 

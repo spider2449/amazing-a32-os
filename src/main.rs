@@ -8,6 +8,8 @@ mod probe;
 mod properties;
 
 #[cfg(any(target_os = "linux", test))]
+mod dhcp;
+#[cfg(any(target_os = "linux", test))]
 mod display;
 #[cfg(any(target_os = "linux", test))]
 mod dump;

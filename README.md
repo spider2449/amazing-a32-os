@@ -181,9 +181,11 @@ Open problems:
 
 ## Wi-Fi
 
-Wi-Fi scanning works from a RAM boot, using the stock programs and firmware from
-the read-only `/system`. One scan found 24 networks. Connecting has not been
-tested, and the steps below are manual: the init does not run them yet.
+Wi-Fi works from a RAM boot, using the stock programs and firmware from the
+read-only `/system`. It joined a 2.4 GHz WPA2 network, got an address from the
+built-in `dhcp` command, and pinged both the gateway and 8.8.8.8 with no packet
+loss. The steps below are manual: the init does not run them yet. Name resolution
+and running for longer have not been tested, and the lease is not renewed.
 
 1. Point the kernel at the firmware: write `/system/vendor/firmware` to
    `/sys/module/firmware_class/parameters/path`. This was set while testing, but
@@ -193,6 +195,8 @@ tested, and the steps below are manual: the init does not run them yet.
 4. Run `wmt_launcher -p /vendor/firmware/`, then write `1` to `/dev/wmtWifi`.
    `wlan0` appears.
 5. Run `ip link set wlan0 up`, then `wpa_supplicant`.
+6. Add the network with `wpa_cli`, then run `dhcp wlan0` on the console. The stock
+   system has no DHCP client program, so this one is written in Rust.
 
 Requirements found on the way, which other devices may share:
 
@@ -203,8 +207,9 @@ Requirements found on the way, which other devices may share:
   output if it cannot create its control socket. Its directory and
   `/data/misc/wifi/sockets` must belong to that user.
 
-`/data` is not mounted, so the MAC address `00:08:22:80:06:fc` may be a default
-instead of this phone's own address.
+`/data` is not mounted, so the phone does not use its own MAC address: it changed
+between boots, from `00:08:22:80:06:fc` to `00:08:22:c2:9d:04`. A network that
+filters or reserves by MAC address will see a new device after each boot.
 
 The `sh LINE` console command runs a line with the stock shell.
 

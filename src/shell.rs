@@ -15,6 +15,7 @@ const HELP: &str = "commands:
   reboot [bootloader|recovery] restart the phone
   reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
   sh LINE                      run a line with the stock shell in /system
+  dhcp INTERFACE               get an address for a network interface
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -27,6 +28,8 @@ pub trait Platform {
     fn power_off(&self) -> io::Error;
     /// Runs a line with the phone's stock shell and returns its output.
     fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>>;
+    /// Gets a DHCP lease on an interface, applies it and describes the result.
+    fn dhcp(&self, interface: &str) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -68,6 +71,7 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
             let rest = line.strip_prefix("sh").unwrap_or(line).trim();
             platform.run_stock_shell(rest).and_then(|output| out.write_all(&output))
         }
+        ["dhcp", interface] => platform.dhcp(interface).and_then(|text| writeln!(out, "{text}")),
         ["poweroff"] => Err(platform.power_off()),
         ["poweroff", delay] => match delay.parse() {
             // Blocking the console is fine: the delay exists to unplug USB.
@@ -127,6 +131,10 @@ mod tests {
         fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>> {
             Ok(format!("ran [{line}]\n").into_bytes())
         }
+
+        fn dhcp(&self, interface: &str) -> io::Result<String> {
+            Ok(format!("lease on {interface}"))
+        }
     }
 
     fn session(input: &str) -> (String, Vec<Option<String>>) {
@@ -160,6 +168,12 @@ mod tests {
     fn sh_passes_the_rest_of_the_line_unchanged() {
         assert!(session("sh echo  'a b' > /x\n").0.contains("ran [echo  'a b' > /x]"));
         assert!(session("sh\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn dhcp_needs_one_interface() {
+        assert!(session("dhcp wlan0\n").0.contains("lease on wlan0"));
+        assert!(session("dhcp\n").0.contains("unknown command"));
     }
 
     #[test]
