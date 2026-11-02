@@ -87,6 +87,10 @@ recovery partition, leaving the boot partition untouched:
    console. Do not go through Android, because of the next point.
 3. Check that `/sys/class/BOOT/BOOT/boot/boot_mode` reads `2`.
 
+The image also booted from recovery with USB unplugged before the restart
+(`reboot recovery 30`). Unplugging USB right after the restart instead left the
+phone powered off once; pressing the power key then started Android normally.
+
 Android's `flash_recovery` service restores stock recovery on its next boot; the
 result was byte-identical to the backup. The image therefore cannot stay in
 recovery while Android is in use.
@@ -109,4 +113,27 @@ volume down or both, with power. Fastboot has only been reached from software.
 - The system does not start the stock battery services (`healthd`,
   `fuelgauged_static`). The kernel still charges the battery and reports its
   level and status, but charging to 100% and running on battery are unverified.
+- Plugging in USB can stop charging: the kernel may read a low charger voltage at
+  that moment (`Charger under voltage`) and keep reporting `Not charging`. This
+  happened once in three replugs. Unplugging and replugging restored charging.
 - The kernel in the image is newer than the build on the phone.
+
+## Fail-safe
+
+No key combination reaches fastboot, so the init reboots to fastboot by itself if
+it panics, if the USB console setup fails, or if that setup has not finished after
+60 seconds. A missing USB host is not a failure: the console became ready with the
+USB state still `DISCONNECTED`, and the system kept running past the deadline after
+USB was unplugged. `/run/console-ready` records that moment. A kernel panic is not
+covered.
+
+Each case was tested with a RAM boot, using an image built with a fault:
+
+```sh
+A32_FAULT=panic scripts/build-image.sh   # or usb, hang
+```
+
+Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
+
+`poweroff` on the console turned the phone off. With USB attached, it then showed
+the stock charging screen from the boot partition.

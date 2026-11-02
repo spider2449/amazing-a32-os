@@ -3,6 +3,10 @@
 //!
 //! The stock 3.18 kernel has no devtmpfs, so `/dev` is a tmpfs populated by hand.
 //! PID 1 must never exit, because that panics the kernel and reboots the phone.
+//!
+//! The phone can only reach fastboot from software, because no key combination
+//! does it. So if this process panics or the console cannot start, it reboots to
+//! fastboot, where the system can be repaired. A kernel panic is not covered.
 
 use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
@@ -14,6 +18,7 @@ use std::io::{self, BufReader, Write};
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -41,6 +46,20 @@ const SERIAL_DEVICE: &str = "/dev/ttyGS0";
 const SYS_BLOCK: &str = "/sys/class/block";
 const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
+// Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
+const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
+const CONSOLE_READY_INFO: &str = "/run/console-ready";
+const USB_STATE: &str = "/sys/class/android_usb/android0/state";
+// Time for the kernel log and the screen to settle before restarting.
+const FAIL_SAFE_DELAY: Duration = Duration::from_secs(3);
+
+/// Set when the console device exists. A host does not need to be attached, so
+/// running on battery without USB does not count as a failure.
+static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
+
+/// A fault to inject for testing the fail-safe, chosen at build time with the
+/// `A32_FAULT` environment variable: `panic`, `usb` or `hang`.
+const FAULT: Option<&str> = option_env!("A32_FAULT");
 
 const FB_SYSFS_DEV: &str = "/sys/class/graphics/fb0/dev";
 const FB_DEVICE: &str = "/dev/fb0";
@@ -64,6 +83,7 @@ const REBOOT_MAGIC1: c_ulong = 0xfee1_dead;
 const REBOOT_MAGIC2: c_ulong = 0x2812_1969;
 const REBOOT_CMD_RESTART: c_ulong = 0x0123_4567;
 const REBOOT_CMD_RESTART2: c_ulong = 0xa1b2_c3d4;
+const REBOOT_CMD_POWER_OFF: c_ulong = 0x4321_fedc;
 
 /// Filesystems as (fstype, mount point). `/dev` must come first for logging.
 const MOUNTS: &[(&str, &str)] = &[
@@ -82,11 +102,8 @@ const DEVICES: &[(&str, u32, u32, c_uint)] = &[
 
 /// Boots userspace. Never returns.
 pub fn run() -> ! {
-    // A panic hook that parks forever stops panic=abort from killing PID 1.
-    std::panic::set_hook(Box::new(|info| {
-        log(&format!("panic: {info}"));
-        park();
-    }));
+    // The hook never returns, which stops panic=abort from killing PID 1.
+    std::panic::set_hook(Box::new(|info| fail_safe(&format!("panic: {info}"))));
 
     // Failures are collected because `/dev/kmsg` does not exist until the
     // device nodes below have been created.
@@ -116,14 +133,37 @@ pub fn run() -> ! {
     log(&crate::probe::report());
 
     if let Err(err) = thread::Builder::new().spawn(serial_console) {
-        log(&format!("console thread failed: {err}"));
+        fail_safe(&format!("console thread failed: {err}"));
+    }
+    if let Err(err) = thread::Builder::new().spawn(console_deadline) {
+        log(&format!("console deadline thread failed: {err}"));
     }
     if let Err(err) = thread::Builder::new().spawn(status_screen) {
         log(&format!("display thread failed: {err}"));
     }
 
     log("boot complete");
+    if FAULT == Some("panic") {
+        panic!("injected fault");
+    }
     reap_forever()
+}
+
+/// Reboots to fastboot, the only way to repair the system. Never returns.
+fn fail_safe(reason: &str) -> ! {
+    log(&format!("fail-safe: {reason}"));
+    thread::sleep(FAIL_SAFE_DELAY);
+    let err = KernelPlatform.reboot(Some("bootloader"));
+    log(&format!("fail-safe reboot failed: {err}"));
+    park()
+}
+
+/// Catches a console setup that hangs instead of failing.
+fn console_deadline() {
+    thread::sleep(CONSOLE_DEADLINE);
+    if !CONSOLE_READY.load(Ordering::Acquire) {
+        fail_safe("console setup did not finish");
+    }
 }
 
 /// Runs the status screen. A display failure leaves the console usable.
@@ -161,19 +201,23 @@ fn run_status_screen() -> io::Result<()> {
 
 /// Brings up the USB serial port and serves the shell on it forever.
 fn serial_console() {
+    match FAULT {
+        Some("usb") => fail_safe("injected fault"),
+        Some("hang") => park(),
+        _ => {}
+    }
     if let Err(err) = usb::enable_serial(Path::new(usb::ANDROID_USB)) {
-        log(&format!("usb gadget failed: {err}"));
-        return;
+        fail_safe(&format!("usb gadget failed: {err}"));
     }
     let Some((major, minor)) = wait_for_serial_device() else {
-        log("usb serial device did not appear");
-        return;
+        fail_safe("usb serial device did not appear");
     };
     if let Err(err) = make_char_device(SERIAL_DEVICE, major, minor, 0o600) {
-        log(&format!("mknod {SERIAL_DEVICE} failed: {err}"));
-        return;
+        fail_safe(&format!("mknod {SERIAL_DEVICE} failed: {err}"));
     }
+    CONSOLE_READY.store(true, Ordering::Release);
     log("usb serial console ready");
+    record_console_ready();
 
     // Open and read fail while no host is attached, and input ends on
     // disconnect, so keep retrying for the lifetime of the system.
@@ -183,6 +227,15 @@ fn serial_console() {
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Records when the console became ready and whether a USB host was attached.
+/// The kernel log is too busy to keep this, because it soon overwrites old lines.
+fn record_console_ready() {
+    let read = |path| fs::read_to_string(path).unwrap_or_else(|err| format!("{err}\n"));
+    let uptime = read("/proc/uptime");
+    let state = read(USB_STATE);
+    let _ = fs::write(CONSOLE_READY_INFO, format!("uptime: {uptime}usb state: {state}"));
 }
 
 fn wait_for_serial_device() -> Option<(u32, u32)> {
@@ -243,6 +296,14 @@ impl Platform for KernelPlatform {
             Some(Err(err)) => return err,
         };
         debug_assert!(rc < 0);
+        io::Error::last_os_error()
+    }
+
+    fn power_off(&self) -> io::Error {
+        // SAFETY: `sync` takes no arguments and has no memory safety requirements.
+        unsafe { sync() };
+        // SAFETY: this reboot command takes no pointer arguments.
+        unsafe { syscall(SYS_REBOOT, REBOOT_MAGIC1, REBOOT_MAGIC2, REBOOT_CMD_POWER_OFF, 0) };
         io::Error::last_os_error()
     }
 }

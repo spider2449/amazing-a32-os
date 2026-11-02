@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::thread;
+use std::time::Duration;
 
 const HELP: &str = "commands:
   help                         show this text
@@ -11,6 +13,8 @@ const HELP: &str = "commands:
   dmesg                        print the kernel log
   dump PATH OFFSET LENGTH      print a file range as base64
   reboot [bootloader|recovery] restart the phone
+  reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
+  poweroff                    turn the phone off
 ";
 
 /// Operations that need the real kernel, abstracted for host testing.
@@ -18,6 +22,8 @@ pub trait Platform {
     fn kernel_log(&self) -> io::Result<Vec<u8>>;
     /// Only returns if the restart request failed.
     fn reboot(&self, target: Option<&str>) -> io::Error;
+    /// Only returns if the power off request failed.
+    fn power_off(&self) -> io::Error;
 }
 
 /// Serves commands until the input ends.
@@ -47,6 +53,15 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         },
         ["reboot"] => Err(platform.reboot(None)),
         ["reboot", target @ ("bootloader" | "recovery")] => Err(platform.reboot(Some(target))),
+        ["reboot", target @ ("bootloader" | "recovery"), delay] => match delay.parse() {
+            // Blocking the console is fine: the delay exists to unplug USB.
+            Ok(seconds) => {
+                thread::sleep(Duration::from_secs(seconds));
+                Err(platform.reboot(Some(target)))
+            }
+            Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+        },
+        ["poweroff"] => Err(platform.power_off()),
         _ => {
             writeln!(out, "unknown command or arguments, try: help")?;
             Ok(())
@@ -89,6 +104,10 @@ mod tests {
             self.reboots.borrow_mut().push(target.map(String::from));
             io::Error::other("fake reboot")
         }
+
+        fn power_off(&self) -> io::Error {
+            io::Error::other("fake power off")
+        }
     }
 
     fn session(input: &str) -> (String, Vec<Option<String>>) {
@@ -119,6 +138,12 @@ mod tests {
     }
 
     #[test]
+    fn poweroff_takes_no_arguments() {
+        assert!(session("poweroff\n").0.contains("fake power off"));
+        assert!(session("poweroff now\n").0.contains("unknown command"));
+    }
+
+    #[test]
     fn dump_reports_bad_arguments_and_keeps_the_session() {
         let (out, _) = session("dump /no/such/file x 1\ndump /no/such/file 0 1\nhelp\n");
         assert!(out.contains("error: bad number"));
@@ -133,8 +158,18 @@ mod tests {
             vec![None, Some("bootloader".into()), Some("recovery".into())]
         );
 
-        let (out, reboots) = session("reboot preloader\nreboot bootloader extra\n");
+        let (out, reboots) = session("reboot preloader\nreboot preloader 1\n");
         assert!(reboots.is_empty());
         assert!(out.contains("unknown command"));
+    }
+
+    #[test]
+    fn delayed_reboot_needs_a_valid_delay() {
+        let (_, reboots) = session("reboot recovery 0\n");
+        assert_eq!(reboots, vec![Some("recovery".into())]);
+
+        let (out, reboots) = session("reboot recovery soon\n");
+        assert!(reboots.is_empty());
+        assert!(out.contains("error: bad number"));
     }
 }
