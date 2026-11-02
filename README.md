@@ -100,6 +100,9 @@ fastboot flash boot phone-tools/backup/boot-mmcblk0p7.img
 fastboot reboot
 ```
 
+This round trip was tested: Android 2018-09-13 started from the backup in 67
+seconds, and flashing this system again left the same image and stock recovery.
+
 ## Boot from flash
 
 The bootloader accepts this unsigned image from flash. This was tested on the
@@ -157,6 +160,11 @@ A32_FAULT=panic scripts/build-image.sh   # or usb, hang
 ```
 
 Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
+
+## Power key
+
+A short press turns the backlight off or on. Holding the key for 3 seconds powers
+the phone off. Without USB it stays off until the key starts it again.
 
 ## Power off and charging
 

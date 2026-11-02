@@ -10,19 +10,31 @@
 
 use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
+use crate::input::{self, Action, PowerKey, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::usb;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Write};
-use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use std::io::{self, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+}
+
+const POLLIN: c_short = 1;
 
 extern "C" {
+    fn poll(fds: *mut PollFd, count: c_ulong, timeout_ms: c_int) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -48,6 +60,10 @@ const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
 // Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
 const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
+const SYS_INPUT: &str = "/sys/class/input";
+// The kernel's keypad device, which reports the power and volume keys.
+const KEYPAD_NAME: &str = "mtk-kpd";
+const KEYPAD_DEVICE: &str = "/dev/keypad";
 const BOOT_MODE: &str = "/sys/class/BOOT/BOOT/boot/boot_mode";
 // MediaTek's KERNEL_POWER_OFF_CHARGING: USB was plugged into a powered-off phone.
 // The console never appears in this mode, so it would leave no way to fastboot.
@@ -154,6 +170,9 @@ pub fn run() -> ! {
     if let Err(err) = thread::Builder::new().spawn(status_screen) {
         log(&format!("display thread failed: {err}"));
     }
+    if let Err(err) = thread::Builder::new().spawn(power_key) {
+        log(&format!("power key thread failed: {err}"));
+    }
 
     log("boot complete");
     if FAULT == Some("panic") {
@@ -216,6 +235,79 @@ fn run_status_screen() -> io::Result<()> {
         framebuffer.present(canvas.pixels())?;
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Runs the power key. A failure leaves the console and the screen usable.
+fn power_key() {
+    if let Err(err) = run_power_key() {
+        log(&format!("power key stopped: {err}"));
+    }
+}
+
+fn run_power_key() -> io::Result<()> {
+    let (major, minor) = find_keypad()?;
+    make_char_device(KEYPAD_DEVICE, major, minor, 0o600)?;
+    let mut device = File::open(KEYPAD_DEVICE)?;
+
+    let start = Instant::now();
+    let mut key = PowerKey::default();
+    let mut screen_on = true;
+    loop {
+        let timeout = key.wait_limit(start.elapsed());
+        let action = if wait_readable(&device, timeout)? {
+            let mut raw = [0u8; EVENT_LEN];
+            device.read_exact(&mut raw)?;
+            input::parse_event(&raw).and_then(|event| key.event(event, start.elapsed()))
+        } else {
+            key.tick(start.elapsed())
+        };
+        match action {
+            Some(Action::ToggleScreen) => {
+                screen_on = !screen_on;
+                let level = if screen_on { BACKLIGHT_LEVEL } else { "0" };
+                if let Err(err) = fs::write(BACKLIGHT, level) {
+                    log(&format!("backlight failed: {err}"));
+                }
+            }
+            Some(Action::PowerOff) => {
+                log("power key: powering off");
+                let err = KernelPlatform.power_off();
+                log(&format!("power off failed: {err}"));
+            }
+            None => {}
+        }
+    }
+}
+
+fn find_keypad() -> io::Result<(u32, u32)> {
+    for entry in fs::read_dir(SYS_INPUT)? {
+        let path = entry?.path();
+        let is_keypad = fs::read_to_string(path.join("device/name"))
+            .is_ok_and(|name| name.trim() == KEYPAD_NAME);
+        // `inputN` entries also match, but only `eventN` entries have `dev`.
+        if is_keypad {
+            if let Ok(dev) = fs::read_to_string(path.join("dev")) {
+                return usb::parse_dev(&dev)
+                    .ok_or_else(|| io::Error::other(format!("bad device number: {dev}")));
+            }
+        }
+    }
+    Err(io::Error::other(format!("{KEYPAD_NAME} not found")))
+}
+
+/// Returns whether `file` has data before the timeout. `None` waits forever.
+fn wait_readable(file: &File, timeout: Option<Duration>) -> io::Result<bool> {
+    let mut entry = PollFd { fd: file.as_raw_fd(), events: POLLIN, revents: 0 };
+    // Round up, so that a long press is not reported a moment too early and
+    // then polled again with a timeout of zero.
+    let timeout_ms = timeout.map_or(-1, |limit| limit.as_millis() as c_int + 1);
+    // SAFETY: `entry` is one valid pollfd for the duration of the call.
+    let ready = unsafe { poll(&mut entry, 1, timeout_ms) };
+    if ready < 0 {
+        let err = io::Error::last_os_error();
+        return if err.kind() == io::ErrorKind::Interrupted { Ok(false) } else { Err(err) };
+    }
+    Ok(ready > 0)
 }
 
 /// Brings up the USB serial port and serves the shell on it forever.

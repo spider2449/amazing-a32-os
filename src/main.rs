@@ -11,6 +11,8 @@ mod display;
 mod dump;
 #[cfg(target_os = "linux")]
 mod fb;
+#[cfg(any(target_os = "linux", test))]
+mod input;
 #[cfg(target_os = "linux")]
 mod pid1;
 #[cfg(any(target_os = "linux", test))]
