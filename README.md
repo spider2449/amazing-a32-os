@@ -77,6 +77,29 @@ image part of the result. Stock build `091318` of this phone is backed up in the
 local, untracked `phone-tools/backup/`. Add `-Path /dev/recovery` for the recovery
 partition.
 
+## Flash to the boot partition
+
+The phone now boots this system from its boot partition, and no longer starts
+Android. Flash only when the console works in a RAM boot, because the console is
+the way back to fastboot:
+
+```sh
+fastboot flash boot target/a32-boot.img
+fastboot reboot
+```
+
+Pressing the power key on a powered-off phone without USB starts this system. The
+battery level is an estimate that depends on how the phone started: it read 96%
+and 97% after starting without USB, and 86% and 89% after starting with USB.
+
+To return to Android, send `reboot bootloader` on the console, then flash the
+backup of the stock boot partition:
+
+```sh
+fastboot flash boot phone-tools/backup/boot-mmcblk0p7.img
+fastboot reboot
+```
+
 ## Boot from flash
 
 The bootloader accepts this unsigned image from flash. This was tested on the

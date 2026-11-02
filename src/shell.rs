@@ -14,7 +14,7 @@ const HELP: &str = "commands:
   dump PATH OFFSET LENGTH      print a file range as base64
   reboot [bootloader|recovery] restart the phone
   reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
-  poweroff                    turn the phone off
+  poweroff [SECONDS]           turn the phone off, optionally after a delay
 ";
 
 /// Operations that need the real kernel, abstracted for host testing.
@@ -62,6 +62,14 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
             Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
         },
         ["poweroff"] => Err(platform.power_off()),
+        ["poweroff", delay] => match delay.parse() {
+            // Blocking the console is fine: the delay exists to unplug USB.
+            Ok(seconds) => {
+                thread::sleep(Duration::from_secs(seconds));
+                Err(platform.power_off())
+            }
+            Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+        },
         _ => {
             writeln!(out, "unknown command or arguments, try: help")?;
             Ok(())
@@ -138,9 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn poweroff_takes_no_arguments() {
+    fn poweroff_takes_an_optional_delay() {
         assert!(session("poweroff\n").0.contains("fake power off"));
-        assert!(session("poweroff now\n").0.contains("unknown command"));
+        assert!(session("poweroff 0\n").0.contains("fake power off"));
+        assert!(session("poweroff now\n").0.contains("error: bad number"));
+        assert!(session("poweroff 0 extra\n").0.contains("unknown command"));
     }
 
     #[test]
