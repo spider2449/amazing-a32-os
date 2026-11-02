@@ -48,6 +48,12 @@ const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
 // Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
 const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
+const BOOT_MODE: &str = "/sys/class/BOOT/BOOT/boot/boot_mode";
+// MediaTek's KERNEL_POWER_OFF_CHARGING: USB was plugged into a powered-off phone.
+// The console never appears in this mode, so it would leave no way to fastboot.
+// The low battery variant, mode 9, is left alone to avoid restarting on an empty
+// battery.
+const CHARGER_BOOT_MODE: &str = "8";
 const CONSOLE_READY_INFO: &str = "/run/console-ready";
 const USB_STATE: &str = "/sys/class/android_usb/android0/state";
 // Time for the kernel log and the screen to settle before restarting.
@@ -132,6 +138,13 @@ pub fn run() -> ! {
     }
     log(&crate::probe::report());
 
+    // A software restart is a normal boot, even with USB attached.
+    if fs::read_to_string(BOOT_MODE).is_ok_and(|mode| mode.trim() == CHARGER_BOOT_MODE) {
+        log("charger boot: restarting into normal mode");
+        let err = KernelPlatform.reboot(None);
+        log(&format!("charger boot restart failed: {err}"));
+    }
+
     if let Err(err) = thread::Builder::new().spawn(serial_console) {
         fail_safe(&format!("console thread failed: {err}"));
     }
@@ -188,12 +201,18 @@ fn run_status_screen() -> io::Result<()> {
     log(&info);
     let _ = fs::write(DISPLAY_INFO, info);
 
+    let boot_mode = fs::read_to_string(BOOT_MODE).ok();
     let mut canvas = Canvas::new(format);
     loop {
         let uptime = fs::read_to_string("/proc/uptime")?;
         let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
         let status = fs::read_to_string(BATTERY_STATUS).ok();
-        canvas.render_status(&status_lines(&uptime, capacity.as_deref(), status.as_deref()));
+        canvas.render_status(&status_lines(
+            &uptime,
+            capacity.as_deref(),
+            status.as_deref(),
+            boot_mode.as_deref(),
+        ));
         framebuffer.present(canvas.pixels())?;
         thread::sleep(Duration::from_secs(1));
     }

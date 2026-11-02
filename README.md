@@ -158,5 +158,19 @@ A32_FAULT=panic scripts/build-image.sh   # or usb, hang
 
 Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
 
-`poweroff` on the console turned the phone off. With USB attached, it then showed
-the stock charging screen from the boot partition.
+## Power off and charging
+
+With USB attached, a powered-off phone starts by itself in charger mode. The USB
+console does not appear in this mode, and unplugging USB turns the phone off. The
+init therefore restarts into normal mode when `boot_mode` is `8`. It stays in place
+for `9`, the low battery charger mode. The status screen shows the mode.
+
+This was tested with `poweroff` while USB was attached. The phone started twice,
+then ended in mode `0` with the console ready about 60 seconds later. Each start
+briefly showed USB ID `0E8D:2000`, which is MediaTek's preloader.
+
+As a result the phone cannot stay off with USB attached. `poweroff` only stays off
+without USB.
+
+To leave charger mode if the console is missing, unplug USB, which turns the phone
+off, press the power key with USB unplugged, then plug USB back in.

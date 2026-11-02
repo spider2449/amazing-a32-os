@@ -160,7 +160,12 @@ impl Canvas {
 }
 
 /// Formats the live status lines from raw kernel values.
-pub fn status_lines(uptime: &str, capacity: Option<&str>, status: Option<&str>) -> Vec<String> {
+pub fn status_lines(
+    uptime: &str,
+    capacity: Option<&str>,
+    status: Option<&str>,
+    boot_mode: Option<&str>,
+) -> Vec<String> {
     let seconds = uptime
         .split_whitespace()
         .next()
@@ -178,6 +183,7 @@ pub fn status_lines(uptime: &str, capacity: Option<&str>, status: Option<&str>) 
             capacity.map_or("?", str::trim),
             status.map_or("UNKNOWN", str::trim)
         ),
+        format!("MODE {}", boot_mode.map_or("?", str::trim)),
     ]
 }
 
@@ -295,7 +301,7 @@ mod tests {
     #[test]
     fn status_screen_shows_all_three_color_bars() {
         let mut canvas = Canvas::new(rgba8888());
-        canvas.render_status(&status_lines("5.0 1.0", Some("50"), Some("Charging")));
+        canvas.render_status(&status_lines("5.0 1.0", Some("50"), Some("Charging"), Some("0")));
         assert_eq!(pixel(&canvas, 10, 230), [255, 0, 0, 255]);
         assert_eq!(pixel(&canvas, 170, 230), [0, 255, 0, 255]);
         assert_eq!(pixel(&canvas, 470, 230), [0, 0, 255, 255]);
@@ -318,12 +324,12 @@ mod tests {
     #[test]
     fn formats_status_lines() {
         assert_eq!(
-            status_lines("3725.40 99.0\n", Some("62\n"), Some("Charging\n")),
-            vec!["UP 01:02:05", "BAT 62% Charging"]
+            status_lines("3725.40 99.0\n", Some("62\n"), Some("Charging\n"), Some("9\n")),
+            vec!["UP 01:02:05", "BAT 62% Charging", "MODE 9"]
         );
         assert_eq!(
-            status_lines("garbage", None, None),
-            vec!["UP 00:00:00", "BAT ?% UNKNOWN"]
+            status_lines("garbage", None, None, None),
+            vec!["UP 00:00:00", "BAT ?% UNKNOWN", "MODE ?"]
         );
     }
 
