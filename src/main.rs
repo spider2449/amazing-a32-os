@@ -5,6 +5,10 @@
 
 mod probe;
 
+#[cfg(any(target_os = "linux", test))]
+mod display;
+#[cfg(target_os = "linux")]
+mod fb;
 #[cfg(target_os = "linux")]
 mod pid1;
 #[cfg(any(target_os = "linux", test))]

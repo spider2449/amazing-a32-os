@@ -18,6 +18,9 @@ kernel with a Rust userspace.
 
 ## Firmware
 
+Stock firmware download:
+<https://www.taiwanmobile.com/events/A32/A32UpgradeProcedure.html>
+
 The kernel comes from the stock OTA package, which is not stored in git:
 `phone-tools/firmware/full_esky6737m_35_n-ota-110520.zip` (build `110520`,
 2020-11-05). Its whole-file signature verifies against the OTA certificate
@@ -37,7 +40,8 @@ No ARM GCC toolchain is needed: the build uses Rust's bundled LLD and musl.
 
 - Run as PID 1: mounts `/dev`, `/proc`, `/sys` and `/run`, creates device nodes,
   logs to the kernel log, starts a USB serial debug shell (VID `0e8d`, PID
-  `2007`), then reaps child processes forever.
+  `2007`), draws a status screen with uptime and battery on `fb0` (RGBA8888),
+  then reaps child processes forever.
 - Run as any other PID: prints a read-only device report and exits.
 
 Both paths have run on the phone. The PID 1 path was tested with a RAM boot for

@@ -1,8 +1,11 @@
-//! PID 1 duties: filesystems, device nodes, logging, USB console, child reaping.
+//! PID 1 duties: filesystems, device nodes, logging, USB console, status screen
+//! and child reaping.
 //!
 //! The stock 3.18 kernel has no devtmpfs, so `/dev` is a tmpfs populated by hand.
 //! PID 1 must never exit, because that panics the kernel and reboots the phone.
 
+use crate::display::{status_lines, Canvas};
+use crate::fb::Framebuffer;
 use crate::shell::{self, Platform};
 use crate::usb;
 use std::ffi::CString;
@@ -32,6 +35,15 @@ extern "C" {
 const S_IFCHR: c_uint = 0o020000;
 const SERIAL_DEVICE: &str = "/dev/ttyGS0";
 const SERIAL_WAIT_SECONDS: u32 = 30;
+
+const FB_SYSFS_DEV: &str = "/sys/class/graphics/fb0/dev";
+const FB_DEVICE: &str = "/dev/fb0";
+const DISPLAY_INFO: &str = "/run/display-info";
+const BACKLIGHT: &str = "/sys/class/leds/lcd-backlight/brightness";
+// A low level, because the screen stays on for the whole session.
+const BACKLIGHT_LEVEL: &str = "64";
+const BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
+const BATTERY_STATUS: &str = "/sys/class/power_supply/battery/status";
 
 const SYSLOG_ACTION_READ_ALL: c_int = 3;
 const SYSLOG_ACTION_SIZE_BUFFER: c_int = 10;
@@ -88,9 +100,45 @@ pub fn run() -> ! {
     if let Err(err) = thread::Builder::new().spawn(serial_console) {
         log(&format!("console thread failed: {err}"));
     }
+    if let Err(err) = thread::Builder::new().spawn(status_screen) {
+        log(&format!("display thread failed: {err}"));
+    }
 
     log("boot complete");
     reap_forever()
+}
+
+/// Runs the status screen. A display failure leaves the console usable.
+fn status_screen() {
+    if let Err(err) = run_status_screen() {
+        log(&format!("display stopped: {err}"));
+        let _ = fs::write(DISPLAY_INFO, format!("stopped: {err}\n"));
+    }
+}
+
+fn run_status_screen() -> io::Result<()> {
+    let dev = fs::read_to_string(FB_SYSFS_DEV)?;
+    let (major, minor) = usb::parse_dev(&dev)
+        .ok_or_else(|| io::Error::other(format!("bad device number: {dev}")))?;
+    make_char_device(FB_DEVICE, major, minor, 0o600)?;
+
+    let mut framebuffer = Framebuffer::open(FB_DEVICE)?;
+    let format = framebuffer.format();
+    let unblank = framebuffer.unblank();
+    let backlight = fs::write(BACKLIGHT, BACKLIGHT_LEVEL);
+    let info = format!("{format:?}\nunblank: {unblank:?}\nbacklight: {backlight:?}\n");
+    log(&info);
+    let _ = fs::write(DISPLAY_INFO, info);
+
+    let mut canvas = Canvas::new(format);
+    loop {
+        let uptime = fs::read_to_string("/proc/uptime")?;
+        let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
+        let status = fs::read_to_string(BATTERY_STATUS).ok();
+        canvas.render_status(&status_lines(&uptime, capacity.as_deref(), status.as_deref()));
+        framebuffer.present(canvas.pixels())?;
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// Brings up the USB serial port and serves the shell on it forever.
