@@ -1,0 +1,11 @@
+[build]
+target = "armv7-unknown-linux-musleabihf"
+
+[target.armv7-unknown-linux-musleabihf]
+# Use the bundled LLD and musl so no external ARM GCC toolchain is required.
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[alias]
+test-host = "test --workspace --target x86_64-pc-windows-msvc"
+bootimg = "run -q -p a32-bootimg --target x86_64-pc-windows-msvc --"

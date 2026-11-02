@@ -1,0 +1,6 @@
+[package]
+name = "a32-bootimg"
+version = "0.1.0"
+edition = "2021"
+description = "Host tool that inspects and builds Android boot images and newc cpio archives"
+publish = false

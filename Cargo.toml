@@ -1,0 +1,16 @@
+[package]
+name = "a32-init"
+version = "0.1.0"
+edition = "2021"
+description = "Rust init and device probe for the Innovatech/TWM Amazing A32 (MT6737M)"
+publish = false
+
+[workspace]
+members = ["tools/bootimg"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

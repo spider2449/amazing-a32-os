@@ -1,0 +1,3 @@
+/target
+# Google's platform-tools binaries are installed locally, not vendored.
+/phone-tools
