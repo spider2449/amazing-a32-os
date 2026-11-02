@@ -9,6 +9,7 @@ const HELP: &str = "commands:
   ls PATH                      list a directory
   cat PATH                     print a file
   dmesg                        print the kernel log
+  dump PATH OFFSET LENGTH      print a file range as base64
   reboot [bootloader|recovery] restart the phone
 ";
 
@@ -32,19 +33,20 @@ pub fn run(input: impl BufRead, mut out: impl Write, platform: &impl Platform) -
 }
 
 fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Result<()> {
-    let mut words = line.split_whitespace();
-    let command = words.next();
-    let argument = words.next();
-    let result = match (command, argument, words.next()) {
-        (None, ..) => Ok(()),
-        (Some("help"), None, None) => out.write_all(HELP.as_bytes()),
-        (Some("info"), None, None) => out.write_all(crate::probe::report().as_bytes()),
-        (Some("ls"), Some(path), None) => list(path, out),
-        (Some("cat"), Some(path), None) => fs::read(path).and_then(|data| out.write_all(&data)),
-        (Some("dmesg"), None, None) => platform.kernel_log().and_then(|log| out.write_all(&log)),
-        (Some("reboot"), target @ (None | Some("bootloader" | "recovery")), None) => {
-            Err(platform.reboot(target))
-        }
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let result = match words.as_slice() {
+        [] => Ok(()),
+        ["help"] => out.write_all(HELP.as_bytes()),
+        ["info"] => out.write_all(crate::probe::report().as_bytes()),
+        ["ls", path] => list(path, out),
+        ["cat", path] => fs::read(path).and_then(|data| out.write_all(&data)),
+        ["dmesg"] => platform.kernel_log().and_then(|log| out.write_all(&log)),
+        ["dump", path, offset, length] => match (offset.parse(), length.parse()) {
+            (Ok(offset), Ok(length)) => crate::dump::dump(path, offset, length, out),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+        },
+        ["reboot"] => Err(platform.reboot(None)),
+        ["reboot", target @ ("bootloader" | "recovery")] => Err(platform.reboot(Some(target))),
         _ => {
             writeln!(out, "unknown command or arguments, try: help")?;
             Ok(())
@@ -113,6 +115,13 @@ mod tests {
     fn file_errors_do_not_end_the_session() {
         let (out, _) = session("cat /no/such/file\nhelp\n");
         assert!(out.contains("error:"));
+        assert!(out.contains("commands:"));
+    }
+
+    #[test]
+    fn dump_reports_bad_arguments_and_keeps_the_session() {
+        let (out, _) = session("dump /no/such/file x 1\ndump /no/such/file 0 1\nhelp\n");
+        assert!(out.contains("error: bad number"));
         assert!(out.contains("commands:"));
     }
 

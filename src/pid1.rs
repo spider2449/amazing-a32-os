@@ -33,7 +33,13 @@ extern "C" {
 }
 
 const S_IFCHR: c_uint = 0o020000;
+const S_IFBLK: c_uint = 0o060000;
 const SERIAL_DEVICE: &str = "/dev/ttyGS0";
+
+// Partitions exposed as /dev/NAME so that the console can back them up. Nothing
+// in this system writes to them.
+const SYS_BLOCK: &str = "/sys/class/block";
+const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
 
 const FB_SYSFS_DEV: &str = "/sys/class/graphics/fb0/dev";
@@ -46,7 +52,11 @@ const BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
 const BATTERY_STATUS: &str = "/sys/class/power_supply/battery/status";
 
 const SYSLOG_ACTION_READ_ALL: c_int = 3;
+const SYSLOG_ACTION_CONSOLE_LEVEL: c_int = 8;
 const SYSLOG_ACTION_SIZE_BUFFER: c_int = 10;
+// Only emergencies reach the kernel console. The USB serial driver logs every
+// transfer, and printing those to the console slows the transfers down.
+const CONSOLE_LOG_LEVEL: c_int = 1;
 
 // The reboot syscall number on 32-bit ARM EABI, the only supported target.
 const SYS_REBOOT: c_long = 88;
@@ -90,6 +100,14 @@ pub fn run() -> ! {
         if let Err(err) = make_char_device(path, major, minor, perm) {
             errors.push(format!("mknod {path} failed: {err}"));
         }
+    }
+
+    // SAFETY: this klogctl action does not use the buffer argument.
+    if unsafe { klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, ptr::null_mut(), CONSOLE_LOG_LEVEL) } < 0 {
+        errors.push(format!("console log level failed: {}", io::Error::last_os_error()));
+    }
+    if let Err(err) = make_partition_devices() {
+        errors.push(format!("partition devices failed: {err}"));
     }
 
     for error in &errors {
@@ -255,10 +273,33 @@ fn makedev(major: u32, minor: u32) -> u64 {
         | (minor & 0x000000ff)
 }
 
+fn make_partition_devices() -> io::Result<()> {
+    for entry in fs::read_dir(SYS_BLOCK)? {
+        let path = entry?.path();
+        let Ok(uevent) = fs::read_to_string(path.join("uevent")) else {
+            continue;
+        };
+        let Some(name) = crate::dump::partition_name(&uevent) else {
+            continue;
+        };
+        if EXPOSED_PARTITIONS.contains(&name) {
+            let dev = fs::read_to_string(path.join("dev"))?;
+            let (major, minor) = usb::parse_dev(&dev)
+                .ok_or_else(|| io::Error::other(format!("bad device number: {dev}")))?;
+            make_device(&format!("/dev/{name}"), S_IFBLK | 0o400, major, minor)?;
+        }
+    }
+    Ok(())
+}
+
 fn make_char_device(path: &str, major: u32, minor: u32, perm: c_uint) -> io::Result<()> {
+    make_device(path, S_IFCHR | perm, major, minor)
+}
+
+fn make_device(path: &str, mode: c_uint, major: u32, minor: u32) -> io::Result<()> {
     let path = cstring(path)?;
     // SAFETY: `path` is a valid NUL-terminated string for the call duration.
-    let rc = unsafe { mknod(path.as_ptr(), S_IFCHR | perm, makedev(major, minor)) };
+    let rc = unsafe { mknod(path.as_ptr(), mode, makedev(major, minor)) };
     if rc == 0 {
         Ok(())
     } else {

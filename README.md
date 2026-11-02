@@ -15,6 +15,7 @@ kernel with a Rust userspace.
 | Kernel | Linux 3.18.35, no loadable modules, no devtmpfs |
 | Boot state | Bootloader unlocked |
 | Boot partition | `mmcblk0p7`, 16 MiB, offset `0x1d80000` |
+| Recovery partition | `mmcblk0p8`, 16 MiB, offset `0x2d80000` |
 
 ## Firmware
 
@@ -44,8 +45,9 @@ No ARM GCC toolchain is needed: the build uses Rust's bundled LLD and musl.
   then reaps child processes forever.
 - Run as any other PID: prints a read-only device report and exits.
 
-Both paths have run on the phone. The PID 1 path was tested with a RAM boot for
-about 75 seconds; long-running stability has not been tested.
+Both paths have run on the phone. The PID 1 path ran from a RAM boot for 64
+minutes on USB power with no reboot and no lost console, while the battery rose
+from 71% to 84%. Running on battery alone has not been tested.
 
 ## Boot the image on the phone
 
@@ -57,8 +59,40 @@ fastboot boot target/a32-boot.img
 ```
 
 About 20 seconds later the phone appears as a USB serial port (`0E8D:2007`,
-`COM3` on the development PC). Open it with DTR enabled and type `help`. The
-kernel logs each USB serial transfer, so `dmesg` output takes tens of seconds.
+`COM3` on the development PC). Open it with DTR enabled and type `help`.
+`reboot bootloader` on the console returns to fastboot in about 12 seconds.
+
+## Back up the boot partition
+
+While the image is running, this copies the boot partition to the PC in about
+75 seconds, using only the read-only `dump` console command:
+
+```powershell
+scripts/dump-partition.ps1 -OutFile phone-tools/backup/boot-mmcblk0p7.img
+```
+
+The serial link sometimes loses data, so each 64 KiB chunk is checked for length
+and CRC-32 and requested again on failure. `cargo bootimg verify` checks the
+image part of the result. Stock build `091318` of this phone is backed up in the
+local, untracked `phone-tools/backup/`. Add `-Path /dev/recovery` for the recovery
+partition.
+
+## Boot from flash
+
+The bootloader accepts this unsigned image from flash. This was tested on the
+recovery partition, leaving the boot partition untouched:
+
+1. Run `fastboot flash recovery target/a32-boot.img`.
+2. Run `fastboot boot target/a32-boot.img`, then send `reboot recovery` on the
+   console. Do not go through Android, because of the next point.
+3. Check that `/sys/class/BOOT/BOOT/boot/boot_mode` reads `2`.
+
+Android's `flash_recovery` service restores stock recovery on its next boot; the
+result was byte-identical to the backup. The image therefore cannot stay in
+recovery while Android is in use.
+
+No key combination tried reaches fastboot from a powered-off phone: volume up,
+volume down or both, with power. Fastboot has only been reached from software.
 
 ## Fastboot on the Windows development PC
 
@@ -73,6 +107,6 @@ kernel logs each USB serial transfer, so `dmesg` output takes tens of seconds.
 ## Known risks when booting the image
 
 - The system does not start the stock battery services (`healthd`,
-  `fuelgauged_static`). The kernel reports battery level and charging status,
-  but long-term charging behavior is unverified.
+  `fuelgauged_static`). The kernel still charges the battery and reports its
+  level and status, but charging to 100% and running on battery are unverified.
 - The kernel in the image is newer than the build on the phone.

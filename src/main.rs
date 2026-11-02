@@ -7,6 +7,8 @@ mod probe;
 
 #[cfg(any(target_os = "linux", test))]
 mod display;
+#[cfg(any(target_os = "linux", test))]
+mod dump;
 #[cfg(target_os = "linux")]
 mod fb;
 #[cfg(target_os = "linux")]
