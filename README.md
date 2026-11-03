@@ -181,22 +181,60 @@ Open problems:
 
 ## Wi-Fi
 
-Wi-Fi works from a RAM boot, using the stock programs and firmware from the
-read-only `/system`. It joined a 2.4 GHz WPA2 network, got an address from the
-built-in `dhcp` command, and pinged both the gateway and 8.8.8.8 with no packet
-loss. The steps below are manual: the init does not run them yet. Name resolution
-and running for longer have not been tested, and the lease is not renewed.
+The init starts Wi-Fi by itself, using the stock programs and firmware from the
+read-only `/system`, and stops short of joining a network. `/run/wifi-state` reads
+`starting`, `ready`, `failed: REASON` or `off: low battery`. A failure leaves the
+console running, and low battery charger mode skips Wi-Fi.
+
+To join a WPA2 network, on the console:
+
+```text
+wifi join SSID PASSPHRASE
+wifi
+```
+
+Use double quotes around a value with spaces. The details stay in memory only, so
+this must be repeated after each restart. They are not put in the image, not sent
+through a shell and not logged. If joining fails, the network is removed again.
+The console echoes what is typed back to the connected computer.
+
+Test results, all from RAM boots restarted through fastboot with USB attached:
+
+- 11 of 11 boots reached `ready` in 11 seconds, on the first power on attempt.
+  Each one then scanned and found 14 to 21 networks, and had `/dev/touch`.
+- `wifi join` with a network that does not exist, tried twice, reported the failure
+  and left no network configured. The passphrase was not found in `/run` or in the
+  kernel log.
+
+To repeat this, which does not write to flash or join a real network:
+
+```powershell
+scripts/test-wifi-boots.ps1 -Count 10 -JoinFailure
+```
+
+Not tested:
+
+- `wifi join` has not joined a real network. The same steps, run by hand, joined a
+  2.4 GHz WPA2 network, got an address from the built-in `dhcp` command, and pinged
+  both the gateway and 8.8.8.8 with no packet loss.
+- A cold start or running without USB, with Wi-Fi starting at boot. This image has
+  not been flashed.
+- Name resolution, running for longer, and battery use with Wi-Fi on. The lease is
+  not renewed.
+
+The init runs these steps, in this order:
 
 1. Point the kernel at the firmware: write `/system/vendor/firmware` to
-   `/sys/module/firmware_class/parameters/path`. This was set while testing, but
-   whether it is required has not been checked.
+   `/sys/module/firmware_class/parameters/path`. Whether this is required has not
+   been checked.
 2. Create `/dev/wmtdetect`, `/dev/btif` and `/dev/ttyMT2` from `/sys/dev/char`.
 3. Run `wmt_loader`, then create `/dev/stpwmt` and `/dev/wmtWifi` the same way.
 4. Run `wmt_launcher -p /vendor/firmware/`, then write `1` to `/dev/wmtWifi`.
    `wlan0` appears.
 5. Run `ip link set wlan0 up`, then `wpa_supplicant`.
-6. Add the network with `wpa_cli`, then run `dhcp wlan0` on the console. The stock
-   system has no DHCP client program, so this one is written in Rust.
+
+`wifi join` then adds the network with `wpa_cli` and gets an address. The stock
+system has no DHCP client program, so this one is written in Rust.
 
 Requirements found on the way, which other devices may share:
 

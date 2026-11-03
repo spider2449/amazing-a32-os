@@ -1,5 +1,6 @@
 //! Minimal debug shell served over the USB serial console.
 
+use crate::wifi::{self, Credentials};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::thread;
@@ -16,6 +17,9 @@ const HELP: &str = "commands:
   reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
   sh LINE                      run a line with the stock shell in /system
   dhcp INTERFACE               get an address for a network interface
+  wifi                         show the Wi-Fi state
+  wifi join SSID PASSPHRASE    join a WPA2 network until the next restart;
+                               use double quotes around a value with spaces
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -30,6 +34,10 @@ pub trait Platform {
     fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>>;
     /// Gets a DHCP lease on an interface, applies it and describes the result.
     fn dhcp(&self, interface: &str) -> io::Result<String>;
+    /// Describes the Wi-Fi state.
+    fn wifi_status(&self) -> io::Result<String>;
+    /// Joins a network, gets an address and describes the result.
+    fn wifi_join(&self, credentials: &Credentials) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -72,6 +80,15 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
             platform.run_stock_shell(rest).and_then(|output| out.write_all(&output))
         }
         ["dhcp", interface] => platform.dhcp(interface).and_then(|text| writeln!(out, "{text}")),
+        ["wifi"] => platform.wifi_status().and_then(|text| writeln!(out, "{text}")),
+        ["wifi", "join", ..] => {
+            let rest = line.strip_prefix("wifi").unwrap_or(line).trim_start();
+            let rest = rest.strip_prefix("join").unwrap_or(rest);
+            wifi::parse_join(rest)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
+                .and_then(|credentials| platform.wifi_join(&credentials))
+                .and_then(|text| writeln!(out, "{text}"))
+        }
         ["poweroff"] => Err(platform.power_off()),
         ["poweroff", delay] => match delay.parse() {
             // Blocking the console is fine: the delay exists to unplug USB.
@@ -132,6 +149,14 @@ mod tests {
             Ok(format!("ran [{line}]\n").into_bytes())
         }
 
+        fn wifi_status(&self) -> io::Result<String> {
+            Ok("wifi state".into())
+        }
+
+        fn wifi_join(&self, credentials: &Credentials) -> io::Result<String> {
+            Ok(format!("joined {}", credentials.ssid))
+        }
+
         fn dhcp(&self, interface: &str) -> io::Result<String> {
             Ok(format!("lease on {interface}"))
         }
@@ -174,6 +199,16 @@ mod tests {
     fn dhcp_needs_one_interface() {
         assert!(session("dhcp wlan0\n").0.contains("lease on wlan0"));
         assert!(session("dhcp\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn wifi_join_checks_its_arguments() {
+        assert!(session("wifi\n").0.contains("wifi state"));
+        assert!(session("wifi join net password1\n").0.contains("joined 6e6574"));
+        assert!(session("wifi  join  \"a b\"  password1\n").0.contains("joined 612062"));
+        assert!(session("wifi join net short\n").0.contains("error: the passphrase"));
+        assert!(session("wifi join\n").0.contains("error: usage"));
+        assert!(session("wifi leave\n").0.contains("unknown command"));
     }
 
     #[test]

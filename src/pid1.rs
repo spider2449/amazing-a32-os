@@ -14,6 +14,7 @@ use crate::fb::Framebuffer;
 use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::usb;
+use crate::wifi;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -92,6 +93,41 @@ const PROPERTY_AREA: &str = "/dev/__properties__";
 const STOCK_PROPERTIES: &[(&str, &str)] = &[("service.wcn.driver.ready", "yes")];
 const ECHILD: i32 = 10;
 const STOCK_IP: &str = "/system/bin/ip";
+// The state of the Wi-Fi startup. Network details are never written here.
+const WIFI_STATE: &str = "/run/wifi-state";
+const WIFI_READY: &str = "ready";
+const WIFI_INTERFACE: &str = "wlan0";
+const FIRMWARE_PATH_PARAMETER: &str = "/sys/module/firmware_class/parameters/path";
+const FIRMWARE_DIR: &str = "/system/vendor/firmware";
+const SYS_CHAR_DEVICES: &str = "/sys/dev/char";
+// Created when the kernel lists them. `wmt_loader` makes the kernel add some.
+const WMT_DEVICES: &[&str] = &[
+    "wmtdetect", "stpwmt", "wmtWifi", "stpbt", "stpgps", "stpant", "ttyMT2", "btif", "BTIF",
+];
+const WMT_WIFI_DEVICE: &str = "/dev/wmtWifi";
+const WMT_LOADER: &str = "/system/vendor/bin/wmt_loader";
+const WMT_LOADER_LOG: &str = "/run/wmt_loader.log";
+const WMT_LAUNCHER: &str = "/system/vendor/bin/wmt_launcher";
+const WMT_LAUNCHER_LOG: &str = "/run/wmt_launcher.log";
+const WMT_LOADER_WAIT: Duration = Duration::from_secs(10);
+// Time for `wmt_launcher` to load the firmware before Wi-Fi is turned on.
+const WMT_LAUNCHER_DELAY: Duration = Duration::from_secs(8);
+const WIFI_POWER_ATTEMPTS: u32 = 3;
+const WIFI_INTERFACE_WAIT: Duration = Duration::from_secs(10);
+const WPA_SUPPLICANT: &str = "/system/bin/wpa_supplicant";
+const WPA_SUPPLICANT_LOG: &str = "/run/wpa.out";
+const WPA_CLI: &str = "/system/bin/wpa_cli";
+const WPA_CONFIG: &str = "/run/wpa.conf";
+const WPA_CONTROL_DIR: &str = "/run/wpa";
+// Android's `wpa_supplicant` runs as this user and keeps sockets in this directory.
+const WIFI_UID: u32 = 1010;
+const WIFI_DIRS: &[&str] = &["/data/misc/wifi", "/data/misc/wifi/sockets", WPA_CONTROL_DIR];
+const WPA_PING_WAIT: Duration = Duration::from_secs(10);
+// Time for a scan to finish before a network is selected.
+const WIFI_SCAN_DELAY: Duration = Duration::from_secs(6);
+const WIFI_JOIN_WAIT: Duration = Duration::from_secs(30);
+const WPA_COMPLETED: &str = "COMPLETED";
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SOL_SOCKET: c_int = 1;
 const SO_BINDTODEVICE: c_int = 25;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -108,6 +144,7 @@ const BOOT_MODE: &str = "/sys/class/BOOT/BOOT/boot/boot_mode";
 // The low battery variant, mode 9, is left alone to avoid restarting on an empty
 // battery.
 const CHARGER_BOOT_MODE: &str = "8";
+const LOW_BATTERY_BOOT_MODE: &str = "9";
 const CONSOLE_READY_INFO: &str = "/run/console-ready";
 const USB_STATE: &str = "/sys/class/android_usb/android0/state";
 // Time for the kernel log and the screen to settle before restarting.
@@ -219,6 +256,9 @@ pub fn run() -> ! {
     }
     if let Err(err) = thread::Builder::new().spawn(power_key) {
         log(&format!("power key thread failed: {err}"));
+    }
+    if let Err(err) = thread::Builder::new().spawn(wifi_service) {
+        log(&format!("wifi thread failed: {err}"));
     }
 
     log("boot complete");
@@ -361,6 +401,212 @@ fn run_power_key() -> io::Result<()> {
             }
             None => {}
         }
+    }
+}
+
+/// Starts Wi-Fi as far as `wpa_supplicant`. A failure leaves the rest running, and
+/// joining a network is left to the console.
+fn wifi_service() {
+    if fs::read_to_string(BOOT_MODE).is_ok_and(|mode| mode.trim() == LOW_BATTERY_BOOT_MODE) {
+        set_wifi_state("off: low battery");
+        return;
+    }
+    set_wifi_state("starting");
+    let start = Instant::now();
+    match start_wifi() {
+        Ok(()) => {
+            log(&format!("wifi: started in {} s", start.elapsed().as_secs()));
+            set_wifi_state(WIFI_READY);
+        }
+        Err(err) => set_wifi_state(&format!("failed: {err}")),
+    }
+}
+
+fn set_wifi_state(state: &str) {
+    log(&format!("wifi: {state}"));
+    let _ = fs::write(WIFI_STATE, format!("{state}\n"));
+}
+
+/// Runs the steps the stock system runs, in the order that was tested by hand.
+fn start_wifi() -> io::Result<()> {
+    fs::write(FIRMWARE_PATH_PARAMETER, FIRMWARE_DIR)?;
+    if !Path::new("/etc").exists() {
+        std::os::unix::fs::symlink("/system/etc", "/etc")?;
+    }
+
+    make_wmt_devices()?;
+    wait_for_child(logged_command(WMT_LOADER, WMT_LOADER_LOG)?.status())?;
+    let loaded = wait_until(WMT_LOADER_WAIT, || {
+        make_wmt_devices().is_ok() && Path::new(WMT_WIFI_DEVICE).exists()
+    });
+    if !loaded {
+        return Err(io::Error::other("wmt_loader did not add wmtWifi"));
+    }
+
+    logged_command(WMT_LAUNCHER, WMT_LAUNCHER_LOG)?
+        .args(["-p", "/vendor/firmware/"])
+        .spawn()?;
+    thread::sleep(WMT_LAUNCHER_DELAY);
+    power_on_wifi()?;
+    run_ip(&["link", "set", WIFI_INTERFACE, "up"])?;
+
+    prepare_wpa_directories()?;
+    logged_command(WPA_SUPPLICANT, WPA_SUPPLICANT_LOG)?
+        .args(["-i", WIFI_INTERFACE, "-Dnl80211"])
+        .arg(format!("-c{WPA_CONFIG}"))
+        .spawn()?;
+    let answers = wait_until(WPA_PING_WAIT, || {
+        wpa_cli(&["ping"]).is_ok_and(|reply| reply.trim() == "PONG")
+    });
+    if !answers {
+        return Err(io::Error::other("wpa_supplicant did not answer"));
+    }
+    Ok(())
+}
+
+/// Creates the devices the kernel lists now and that do not exist yet.
+fn make_wmt_devices() -> io::Result<()> {
+    for entry in fs::read_dir(SYS_CHAR_DEVICES)? {
+        let Ok(uevent) = fs::read_to_string(entry?.path().join("uevent")) else {
+            continue;
+        };
+        let Some(device) = wifi::parse_uevent(&uevent) else {
+            continue;
+        };
+        let path = format!("/dev/{}", device.name);
+        if WMT_DEVICES.contains(&device.name.as_str()) && !Path::new(&path).exists() {
+            make_char_device(&path, device.major, device.minor, 0o600)?;
+        }
+    }
+    Ok(())
+}
+
+/// Asks for Wi-Fi power until the interface appears.
+fn power_on_wifi() -> io::Result<()> {
+    let interface = format!("/sys/class/net/{WIFI_INTERFACE}");
+    for attempt in 1..=WIFI_POWER_ATTEMPTS {
+        if let Err(err) = fs::write(WMT_WIFI_DEVICE, "1\n") {
+            log(&format!("wifi: power on attempt {attempt} failed: {err}"));
+        }
+        if wait_until(WIFI_INTERFACE_WAIT, || Path::new(&interface).exists()) {
+            log(&format!("wifi: {WIFI_INTERFACE} appeared after power on attempt {attempt}"));
+            return Ok(());
+        }
+    }
+    Err(io::Error::other(format!("{WIFI_INTERFACE} did not appear")))
+}
+
+fn prepare_wpa_directories() -> io::Result<()> {
+    for directory in WIFI_DIRS {
+        fs::create_dir_all(directory)?;
+        std::os::unix::fs::chown(directory, Some(WIFI_UID), Some(WIFI_UID))?;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o770))?;
+    }
+    for directory in ["/data", "/data/misc"] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
+    }
+    fs::write(WPA_CONFIG, format!("ctrl_interface={WPA_CONTROL_DIR}\n"))?;
+    fs::set_permissions(WPA_CONFIG, fs::Permissions::from_mode(0o644))
+}
+
+/// Polls a condition once a second. It is checked at least once.
+fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if start.elapsed() >= limit {
+            return false;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// A stock program with the environment it expects.
+fn stock_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env("PATH", STOCK_PATH)
+        .env("ANDROID_ROOT", "/system")
+        .env("ANDROID_DATA", "/data")
+        .stdin(Stdio::null());
+    command
+}
+
+/// A stock program that writes its output and errors to a new file.
+fn logged_command(program: &str, log_path: &str) -> io::Result<Command> {
+    let log = File::create(log_path)?;
+    let mut command = stock_command(program);
+    command.stdout(log.try_clone()?).stderr(log);
+    Ok(command)
+}
+
+/// `reap_forever` may collect a child first, so that error means it has exited.
+fn wait_for_child(result: io::Result<std::process::ExitStatus>) -> io::Result<()> {
+    match result {
+        Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Runs `wpa_cli` directly, without a shell, so that a passphrase needs no
+/// escaping. Its arguments are not logged for the same reason.
+fn wpa_cli(arguments: &[&str]) -> io::Result<String> {
+    let mut child = stock_command(WPA_CLI)
+        .args(["-p", WPA_CONTROL_DIR, "-i", WIFI_INTERFACE])
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut output = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_end(&mut output)?;
+    }
+    wait_for_child(child.wait())?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// Runs a `wpa_cli` command that answers `OK`. Only its name reaches an error.
+fn wpa_command(arguments: &[&str]) -> io::Result<()> {
+    let reply = wpa_cli(arguments)?;
+    if reply.trim() == "OK" {
+        Ok(())
+    } else {
+        let name = arguments.first().copied().unwrap_or_default();
+        Err(io::Error::other(format!("wpa_cli {name} answered: {}", reply.trim())))
+    }
+}
+
+fn join_network(credentials: &wifi::Credentials) -> io::Result<()> {
+    wpa_command(&["remove_network", "all"])?;
+    wpa_command(&["scan"])?;
+    thread::sleep(WIFI_SCAN_DELAY);
+
+    let reply = wpa_cli(&["add_network"])?;
+    let id = reply.trim();
+    if id.parse::<u32>().is_err() {
+        return Err(io::Error::other(format!("wpa_cli add_network answered: {id}")));
+    }
+    wpa_command(&["set_network", id, "ssid", &credentials.ssid])?;
+    wpa_command(&["set_network", id, "psk", &credentials.psk])?;
+    wpa_command(&["set_network", id, "key_mgmt", "WPA-PSK"])?;
+    wpa_command(&["enable_network", id])?;
+    wpa_command(&["select_network", id])?;
+
+    let mut state = String::new();
+    let joined = wait_until(WIFI_JOIN_WAIT, || {
+        let status = wpa_cli(&["status"]).unwrap_or_default();
+        state = wifi::wpa_state(&status).unwrap_or("unknown").to_string();
+        state == WPA_COMPLETED
+    });
+    if joined {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("did not join the network, last state {state}"),
+        ))
     }
 }
 
@@ -514,20 +760,36 @@ impl Platform for KernelPlatform {
         // Output goes to a file instead of a pipe, so that a background program
         // started by the line cannot keep this call waiting.
         let output = File::create(STOCK_SHELL_OUTPUT)?;
-        let status = Command::new(STOCK_SHELL)
-            .args(["-c", line])
-            .env("PATH", STOCK_PATH)
-            .env("ANDROID_ROOT", "/system")
-            .env("ANDROID_DATA", "/data")
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output)
-            .status();
-        match status {
-            // `reap_forever` may collect the child first. It has exited either way.
-            Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
-            _ => fs::read(STOCK_SHELL_OUTPUT),
+        wait_for_child(
+            stock_command(STOCK_SHELL)
+                .args(["-c", line])
+                .stdout(output.try_clone()?)
+                .stderr(output)
+                .status(),
+        )?;
+        fs::read(STOCK_SHELL_OUTPUT)
+    }
+
+    fn wifi_status(&self) -> io::Result<String> {
+        let state = fs::read_to_string(WIFI_STATE)?;
+        let state = state.trim();
+        if state != WIFI_READY {
+            return Ok(format!("startup: {state}"));
         }
+        Ok(format!("startup: {state}\n{}", wpa_cli(&["status"])?.trim_end()))
+    }
+
+    fn wifi_join(&self, credentials: &wifi::Credentials) -> io::Result<String> {
+        let state = fs::read_to_string(WIFI_STATE)?;
+        if state.trim() != WIFI_READY {
+            return Err(io::Error::other(format!("Wi-Fi is not ready: {}", state.trim())));
+        }
+        let result = join_network(credentials).and_then(|()| self.dhcp(WIFI_INTERFACE));
+        if result.is_err() {
+            // Also clears the passphrase from `wpa_supplicant`, and stops its retries.
+            let _ = wpa_command(&["remove_network", "all"]);
+        }
+        result
     }
 
     fn dhcp(&self, interface: &str) -> io::Result<String> {

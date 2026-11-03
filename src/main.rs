@@ -23,6 +23,8 @@ mod pid1;
 mod shell;
 #[cfg(any(target_os = "linux", test))]
 mod usb;
+#[cfg(any(target_os = "linux", test))]
+mod wifi;
 
 fn main() {
     #[cfg(target_os = "linux")]
