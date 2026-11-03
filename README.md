@@ -17,6 +17,28 @@ kernel with a Rust userspace.
 | Boot partition | `mmcblk0p7`, 16 MiB, offset `0x1d80000` |
 | Recovery partition | `mmcblk0p8`, 16 MiB, offset `0x2d80000` |
 
+## Kernel and storage facts
+
+Read from the running phone. Other old devices should be checked the same way,
+because searching the kernel image for strings gave wrong answers here: it did not
+find FUSE, ext2 or ext3, which are all available.
+
+| Item | Value |
+|---|---|
+| Filesystems | ext2, ext3, ext4, vfat, msdos, iso9660, FUSE, tmpfs. No overlay, squashfs or f2fs |
+| Namespaces | `mnt` only, so containers such as Docker are not possible |
+| Cgroups | `cpu`, `cpuacct`, `freezer` and `debug`. No memory controller |
+| Missing | `/dev/net/tun`, `/dev/loop-control`, `/proc/config.gz`, DRM |
+| Sleep states | `freeze`, `mem`, not tried |
+| CPU | ARMv7 mode with NEON, VFPv4, integer divide and SHA-2. At most 1092 MHz |
+| CPU cores | One was online when idle, `cpu0`. How others come online was not checked |
+| CPU governor | `interactive`. Also `ondemand`, `userspace`, `powersave`, `performance` |
+| Listening sockets | None on TCP, TCP6 or UDP, measured after Wi-Fi joined a network |
+
+Partition sizes in MiB: `userdata` 3631, `system` 3072, `cache` 400, `metadata` 37,
+`nvdata` 32, `boot` 16, `recovery` 16. `nvram` and `nvdata` are the likely home of
+the MAC address and radio calibration, so nothing should write to them.
+
 ## Firmware
 
 Stock firmware download:
@@ -138,7 +160,9 @@ volume down or both, with power. Fastboot has only been reached from software.
 
 - The system does not start the stock battery services (`healthd`,
   `fuelgauged_static`). The kernel still charges the battery and reports its
-  level and status, but charging to 100% and running on battery are unverified.
+  level and status. It reached `100` and `Full` on USB power, but the level is an
+  estimate: it read `94` and `Charging` after two later restarts within minutes.
+  Running on battery is unverified.
 - Plugging in USB can stop charging: the kernel may read a low charger voltage at
   that moment (`Charger under voltage`) and keep reporting `Not charging`. This
   happened once in three replugs. Unplugging and replugging restored charging.
@@ -231,10 +255,20 @@ has no `nc`. `tcpdump` is in `/system/xbin`.
 
 Not tested:
 
-- A cold start or running without USB, with Wi-Fi starting at boot. This image has
-  not been flashed.
-- Name resolution, running for longer, and battery use with Wi-Fi on. The lease is
-  not renewed.
+- A start without USB, and running on battery with Wi-Fi on.
+- Name resolution, renewing the lease, and running for longer than 2 hours.
+
+To record a network over time, which never joins or restarts anything:
+
+```powershell
+scripts/test-wifi-soak.ps1 -Hours 2
+```
+
+A 2 hour run on the guest network, at about -32 dBm with USB attached, gave 120 of
+120 checks with no restart, no lost console and no lost connection. 720 of 720 pings
+were answered, half to the gateway and half to 8.8.8.8, whose average round trip was
+8 ms and at most 22.5 ms per check. 120 of 120 TCP connections opened. Free memory
+stayed between 835368 and 837508 kB.
 
 The init runs these steps, in this order:
 
@@ -274,7 +308,9 @@ for `9`, the low battery charger mode. The status screen shows the mode.
 
 This was tested with `poweroff` while USB was attached. The phone started twice,
 then ended in mode `0` with the console ready about 60 seconds later. Each start
-briefly showed USB ID `0E8D:2000`, which is MediaTek's preloader.
+briefly showed USB ID `0E8D:2000`, which is MediaTek's preloader. With this system in
+the boot partition, 3 of 3 tries returned to mode `0` in about 60 seconds with Wi-Fi
+`ready`.
 
 As a result the phone cannot stay off with USB attached. `poweroff` only stays off
 without USB.
