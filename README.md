@@ -212,11 +212,25 @@ To repeat this, which does not write to flash or join a real network:
 scripts/test-wifi-boots.ps1 -Count 10 -JoinFailure
 ```
 
+- `wifi join` joined a 2.4 GHz WPA2 guest network and got an address in 9 seconds,
+  without a restart after leaving another network. The gateway, 8.8.8.8, 1.1.1.1
+  and 168.95.1.1 each answered 6 of 6 pings, and TCP connected to the three public
+  addresses. This was one join, and passphrases were not found in `/run` or in the
+  kernel log.
+- `wifi join` also joined a device's hotspot, shared from its own Wi-Fi, in 10
+  seconds, but the phone could not reach beyond the gateway there, although another
+  device reported internet access through it. The public addresses answered no pings
+  and TCP to them timed out, while TCP to the gateway connected. A capture on the
+  phone showed the pings to 8.8.8.8 leaving with the right addresses, to the
+  gateway's MAC address, with no reply. Since the guest network worked in the same
+  session, the phone's routing is not the likely cause, but the actual cause is not
+  known. Other devices may meet the same hotspot behavior.
+
+`tcp ADDRESS:PORT` on the console tries a TCP connection, because the stock system
+has no `nc`. `tcpdump` is in `/system/xbin`.
+
 Not tested:
 
-- `wifi join` has not joined a real network. The same steps, run by hand, joined a
-  2.4 GHz WPA2 network, got an address from the built-in `dhcp` command, and pinged
-  both the gateway and 8.8.8.8 with no packet loss.
 - A cold start or running without USB, with Wi-Fi starting at boot. This image has
   not been flashed.
 - Name resolution, running for longer, and battery use with Wi-Fi on. The lease is

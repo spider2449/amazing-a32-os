@@ -3,8 +3,11 @@
 use crate::wifi::{self, Credentials};
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
 const HELP: &str = "commands:
   help                         show this text
@@ -20,6 +23,7 @@ const HELP: &str = "commands:
   wifi                         show the Wi-Fi state
   wifi join SSID PASSPHRASE    join a WPA2 network until the next restart;
                                use double quotes around a value with spaces
+  tcp ADDRESS:PORT             try a TCP connection to an IP address
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -89,6 +93,7 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
                 .and_then(|credentials| platform.wifi_join(&credentials))
                 .and_then(|text| writeln!(out, "{text}"))
         }
+        ["tcp", address] => try_tcp(address, out),
         ["poweroff"] => Err(platform.power_off()),
         ["poweroff", delay] => match delay.parse() {
             // Blocking the console is fine: the delay exists to unplug USB.
@@ -107,6 +112,16 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         writeln!(out, "error: {err}")?;
     }
     Ok(())
+}
+
+/// Reports whether a TCP connection opens. No data is sent.
+fn try_tcp(address: &str, out: &mut impl Write) -> io::Result<()> {
+    let address: SocketAddr = address
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad address"))?;
+    let start = Instant::now();
+    TcpStream::connect_timeout(&address, TCP_TIMEOUT)?;
+    writeln!(out, "connected in {} ms", start.elapsed().as_millis())
 }
 
 fn list(path: &str, out: &mut impl Write) -> io::Result<()> {
@@ -209,6 +224,19 @@ mod tests {
         assert!(session("wifi join net short\n").0.contains("error: the passphrase"));
         assert!(session("wifi join\n").0.contains("error: usage"));
         assert!(session("wifi leave\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn tcp_reports_the_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(session(&format!("tcp {address}
+")).0.contains("connected in"));
+        drop(listener);
+        assert!(session(&format!("tcp {address}
+")).0.contains("error:"));
+        assert!(session("tcp nowhere
+").0.contains("error: bad address"));
     }
 
     #[test]
