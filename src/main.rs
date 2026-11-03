@@ -3,6 +3,8 @@
 //! Running as PID 1 boots the system. Running as any other PID only prints a
 //! read-only device report, so the binary is safe to try under stock Android.
 
+#[cfg(any(target_os = "linux", test))]
+mod bench;
 mod probe;
 #[cfg(any(target_os = "linux", test))]
 mod properties;

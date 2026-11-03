@@ -770,6 +770,10 @@ impl Platform for KernelPlatform {
         fs::read(STOCK_SHELL_OUTPUT)
     }
 
+    fn bench(&self, arguments: &[&str]) -> io::Result<String> {
+        crate::bench::run(arguments)
+    }
+
     fn wifi_status(&self) -> io::Result<String> {
         let state = fs::read_to_string(WIFI_STATE)?;
         let state = state.trim();

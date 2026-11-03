@@ -1,0 +1,121 @@
+# label=baseline date=2026-11-03T21:58:31
+# Linux version 3.18.35+
+# uptime=147.32
+# run=1
+cpu.crc threads=1 value=66.2 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=252.2 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.7 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=427.1 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1551.8 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=5925.9 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1270 unit=MB/s
+mem.fill value=3720 unit=MB/s
+mem.read value=1251 unit=MB/s
+mem.latency size_kib=16 value=5.6 unit=ns
+mem.latency size_kib=256 value=18.6 unit=ns
+mem.latency size_kib=2048 value=176.0 unit=ns
+mem.latency size_kib=16384 value=209.6 unit=ns
+mem.latency size_kib=65536 value=218.9 unit=ns
+disk.read_sequential block_kib=1024 value=73.6 unit=MB/s
+disk.read_random block_kib=4 value=2495 unit=IOPS
+net.receive bytes=58064896 value=46.2 unit=Mbit/s
+net.send bytes=55181312 value=43.7 unit=Mbit/s
+# run=2
+cpu.crc threads=1 value=66.6 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=250.7 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.7 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=430.3 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1559.5 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=5882.7 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1235 unit=MB/s
+mem.fill value=3719 unit=MB/s
+mem.read value=1255 unit=MB/s
+mem.latency size_kib=16 value=5.6 unit=ns
+mem.latency size_kib=256 value=18.1 unit=ns
+mem.latency size_kib=2048 value=176.0 unit=ns
+mem.latency size_kib=16384 value=209.3 unit=ns
+mem.latency size_kib=65536 value=220.9 unit=ns
+disk.read_sequential block_kib=1024 value=74.0 unit=MB/s
+disk.read_random block_kib=4 value=2492 unit=IOPS
+net.receive bytes=56360960 value=44.8 unit=Mbit/s
+net.send bytes=28442624 value=22.8 unit=Mbit/s
+# run=3
+cpu.crc threads=1 value=66.4 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=254.2 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.7 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=432.7 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1554.4 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=5913.1 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1258 unit=MB/s
+mem.fill value=3719 unit=MB/s
+mem.read value=1281 unit=MB/s
+mem.latency size_kib=16 value=5.6 unit=ns
+mem.latency size_kib=256 value=18.1 unit=ns
+mem.latency size_kib=2048 value=175.9 unit=ns
+mem.latency size_kib=16384 value=208.8 unit=ns
+mem.latency size_kib=65536 value=219.0 unit=ns
+disk.read_sequential block_kib=1024 value=74.4 unit=MB/s
+disk.read_random block_kib=4 value=2520 unit=IOPS
+net.receive bytes=57409536 value=45.6 unit=Mbit/s
+net.send bytes=53542912 value=42.6 unit=Mbit/s
+load.sample seconds=5 mb_s=241.9 online=0-3 cpu0_khz=1092000 cpu_mc=47100 battery_mc=32000
+load.sample seconds=10 mb_s=245.8 online=0-3 cpu0_khz=1092000 cpu_mc=47700 battery_mc=32000
+load.sample seconds=15 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=48000 battery_mc=32000
+load.sample seconds=20 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=48100 battery_mc=32000
+load.sample seconds=25 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=48300 battery_mc=32000
+load.sample seconds=30 mb_s=246.4 online=0-3 cpu0_khz=1092000 cpu_mc=49100 battery_mc=32000
+load.sample seconds=35 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=48800 battery_mc=32000
+load.sample seconds=40 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=49300 battery_mc=32000
+load.sample seconds=45 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=49200 battery_mc=32000
+load.sample seconds=50 mb_s=244.8 online=0-3 cpu0_khz=1092000 cpu_mc=49200 battery_mc=32000
+load.sample seconds=55 mb_s=245.7 online=0-3 cpu0_khz=1092000 cpu_mc=49700 battery_mc=32000
+load.sample seconds=60 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=49500 battery_mc=32000
+load.sample seconds=65 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=49800 battery_mc=32000
+load.sample seconds=70 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=75 mb_s=246.2 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=80 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=85 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=49800 battery_mc=32000
+load.sample seconds=90 mb_s=245.6 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=95 mb_s=245.1 online=0-3 cpu0_khz=1092000 cpu_mc=49800 battery_mc=32000
+load.sample seconds=100 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=49500 battery_mc=32000
+load.sample seconds=105 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=49300 battery_mc=32000
+load.sample seconds=110 mb_s=245.8 online=0-3 cpu0_khz=1092000 cpu_mc=49800 battery_mc=32000
+load.sample seconds=115 mb_s=244.9 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=120 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=125 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=50200 battery_mc=32000
+load.sample seconds=130 mb_s=244.5 online=0-3 cpu0_khz=1092000 cpu_mc=49700 battery_mc=32000
+load.sample seconds=135 mb_s=246.2 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=32000
+load.sample seconds=140 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=50200 battery_mc=32000
+load.sample seconds=145 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=50200 battery_mc=33000
+load.sample seconds=150 mb_s=245.9 online=0-3 cpu0_khz=1092000 cpu_mc=50000 battery_mc=33000
+load.sample seconds=155 mb_s=244.7 online=0-3 cpu0_khz=1092000 cpu_mc=50400 battery_mc=33000
+load.sample seconds=160 mb_s=244.3 online=0-3 cpu0_khz=1092000 cpu_mc=50200 battery_mc=33000
+load.sample seconds=165 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=50200 battery_mc=33000
+load.sample seconds=170 mb_s=245.5 online=0-3 cpu0_khz=1092000 cpu_mc=50300 battery_mc=33000
+load.sample seconds=175 mb_s=245.0 online=0-3 cpu0_khz=1092000 cpu_mc=50600 battery_mc=33000
+load.sample seconds=180 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=50600 battery_mc=33000
+load.sample seconds=185 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=50900 battery_mc=33000
+load.sample seconds=190 mb_s=245.1 online=0-3 cpu0_khz=1092000 cpu_mc=50600 battery_mc=33000
+load.sample seconds=195 mb_s=245.4 online=0-3 cpu0_khz=1092000 cpu_mc=51000 battery_mc=33000
+load.sample seconds=200 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=51300 battery_mc=33000
+load.sample seconds=205 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51200 battery_mc=33000
+load.sample seconds=210 mb_s=245.7 online=0-3 cpu0_khz=1092000 cpu_mc=50800 battery_mc=33000
+load.sample seconds=215 mb_s=244.8 online=0-3 cpu0_khz=1092000 cpu_mc=50900 battery_mc=33000
+load.sample seconds=220 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=51400 battery_mc=33000
+load.sample seconds=225 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51300 battery_mc=33000
+load.sample seconds=230 mb_s=245.3 online=0-3 cpu0_khz=1092000 cpu_mc=51400 battery_mc=33000
+load.sample seconds=235 mb_s=245.2 online=0-3 cpu0_khz=1092000 cpu_mc=51300 battery_mc=33000
+load.sample seconds=240 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=51400 battery_mc=33000
+load.sample seconds=245 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51600 battery_mc=33000
+load.sample seconds=250 mb_s=245.3 online=0-3 cpu0_khz=1092000 cpu_mc=51800 battery_mc=33000
+load.sample seconds=255 mb_s=245.2 online=0-3 cpu0_khz=1092000 cpu_mc=51900 battery_mc=33000
+load.sample seconds=260 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=51600 battery_mc=33000
+load.sample seconds=265 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51500 battery_mc=33000
+load.sample seconds=270 mb_s=245.9 online=0-3 cpu0_khz=1092000 cpu_mc=51600 battery_mc=33000
+load.sample seconds=275 mb_s=244.6 online=0-3 cpu0_khz=1092000 cpu_mc=51800 battery_mc=33000
+load.sample seconds=280 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=52000 battery_mc=33000
+load.sample seconds=285 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51800 battery_mc=33000
+load.sample seconds=290 mb_s=244.2 online=0-3 cpu0_khz=1092000 cpu_mc=51900 battery_mc=33000
+load.sample seconds=295 mb_s=244.1 online=0-3 cpu0_khz=1092000 cpu_mc=51600 battery_mc=34000
+load.sample seconds=300 mb_s=244.8 online=0-3 cpu0_khz=1092000 cpu_mc=51900 battery_mc=34000
+load.end reason=time seconds=300

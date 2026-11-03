@@ -24,6 +24,9 @@ const HELP: &str = "commands:
   wifi join SSID PASSPHRASE    join a WPA2 network until the next restart;
                                use double quotes around a value with spaces
   tcp ADDRESS:PORT             try a TCP connection to an IP address
+  bench cpu|mem|disk PATH      measure performance
+  bench net PORT [SECONDS]     measure a TCP client, one connection
+  bench load SECONDS           load all CPUs and record temperatures
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -38,6 +41,8 @@ pub trait Platform {
     fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>>;
     /// Gets a DHCP lease on an interface, applies it and describes the result.
     fn dhcp(&self, interface: &str) -> io::Result<String>;
+    /// Runs a performance measurement and returns its results.
+    fn bench(&self, arguments: &[&str]) -> io::Result<String>;
     /// Describes the Wi-Fi state.
     fn wifi_status(&self) -> io::Result<String>;
     /// Joins a network, gets an address and describes the result.
@@ -94,6 +99,9 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
                 .and_then(|text| writeln!(out, "{text}"))
         }
         ["tcp", address] => try_tcp(address, out),
+        ["bench", arguments @ ..] => {
+            platform.bench(arguments).and_then(|text| out.write_all(text.as_bytes()))
+        }
         ["poweroff"] => Err(platform.power_off()),
         ["poweroff", delay] => match delay.parse() {
             // Blocking the console is fine: the delay exists to unplug USB.
@@ -164,6 +172,11 @@ mod tests {
             Ok(format!("ran [{line}]\n").into_bytes())
         }
 
+        fn bench(&self, arguments: &[&str]) -> io::Result<String> {
+            Ok(format!("bench {arguments:?}
+"))
+        }
+
         fn wifi_status(&self) -> io::Result<String> {
             Ok("wifi state".into())
         }
@@ -224,6 +237,12 @@ mod tests {
         assert!(session("wifi join net short\n").0.contains("error: the passphrase"));
         assert!(session("wifi join\n").0.contains("error: usage"));
         assert!(session("wifi leave\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn bench_passes_its_arguments() {
+        assert!(session("bench disk /dev/system
+").0.contains(r#"["disk", "/dev/system"]"#));
     }
 
     #[test]

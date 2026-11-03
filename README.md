@@ -39,6 +39,48 @@ Partition sizes in MiB: `userdata` 3631, `system` 3072, `cache` 400, `metadata` 
 `nvdata` 32, `boot` 16, `recovery` 16. `nvram` and `nvdata` are the likely home of
 the MAC address and radio calibration, so nothing should write to them.
 
+## Performance
+
+The `bench` console command measures the phone, and this saves the results to
+`benchmarks/amazing-a32/LABEL.txt`:
+
+```powershell
+scripts/bench.ps1 -Label baseline -Runs 3 -Net -LoadSeconds 300
+```
+
+Baseline from a RAM boot with USB attached, built with `opt-level = 3` and no
+`target-cpu` setting. Values are the range over 3 runs:
+
+| Measurement | 1 thread | 4 threads |
+|---|---|---|
+| Integer (CRC-32), MB/s | 66.2 to 66.6 | 250.7 to 254.2 |
+| Floating point (matrix), Mflop/s | 115.7 | 427.1 to 432.7 |
+| Vectorizable integer, MB/s | 1552 to 1560 | 5883 to 5926 |
+
+| Measurement | Result |
+|---|---|
+| Memory copy / fill | 1235 to 1270 / 3719 to 3720 MB/s |
+| Memory latency, 16 KiB / 256 KiB / 2 MiB / 64 MiB | 5.6 / 18 / 176 / 219 ns |
+| eMMC sequential read | 73.6 to 74.4 MB/s |
+| eMMC random 4 KiB read | 2492 to 2520 IOPS |
+| Wi-Fi TCP, phone receiving | 44.8 to 46.2 Mbit/s |
+| Wi-Fi TCP, phone sending | 42.6 and 43.7 Mbit/s, and 22.8 once |
+
+`mem.read` is left out, because it only reads every fourth byte. The Wi-Fi figures
+are for a computer on Ethernet behind the same router, on 2.4 GHz at about -32 dBm.
+
+A 5 minute load on all CPUs held 242 to 246 MB/s at 1092 MHz with all 4 CPUs online,
+so no slowdown appeared. The CPU rose from 47.1 to 51.9 C and the battery from 32 to
+34 C, and both were still rising slowly at the end, so this does not show the
+temperature it settles at. `bench load` stops at 85 C on the CPU or 45 C on the
+battery, because of the next point.
+
+All thermal zones read `disabled`, because the stock service that sets them up does
+not run. Do not assume the kernel slows the CPU when it gets hot. This has not been
+tested at high temperature.
+
+Not measured: eMMC writes, USB networking, power use, and running on battery.
+
 ## Firmware
 
 Stock firmware download:

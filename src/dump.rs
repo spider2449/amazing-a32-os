@@ -38,7 +38,7 @@ pub fn partition_name(uevent: &str) -> Option<&str> {
     uevent.lines().find_map(|line| line.strip_prefix("PARTNAME="))
 }
 
-fn crc32(data: &[u8]) -> u32 {
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in data {
         crc ^= u32::from(byte);
