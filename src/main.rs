@@ -24,6 +24,10 @@ mod pid1;
 #[cfg(any(target_os = "linux", test))]
 mod shell;
 #[cfg(any(target_os = "linux", test))]
+mod sntp;
+#[cfg(any(target_os = "linux", test))]
+mod thermal;
+#[cfg(any(target_os = "linux", test))]
 mod usb;
 #[cfg(any(target_os = "linux", test))]
 mod wifi;

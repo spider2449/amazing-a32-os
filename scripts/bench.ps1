@@ -1,5 +1,6 @@
 # Runs the console's performance measurements and saves the results. The phone must
-# be running an image with the bench command. Nothing is written to its storage.
+# be running an image with the bench command. Storage is only written with
+# -WriteFile, which names a new file that the phone removes afterwards.
 #
 # -Net needs the phone on a network that this computer can reach. For its duration
 # the phone listens for one connection on -NetPort. Results hold no network names.
@@ -8,6 +9,7 @@ param(
     [string]$Port = 'COM3',
     [string]$OutDir = 'benchmarks/amazing-a32',
     [string]$DiskPath = '/dev/system',
+    [string]$WriteFile = '',
     [int]$Runs = 3,
     [int]$LoadSeconds = 0,
     [switch]$Net,
@@ -79,6 +81,7 @@ try {
         [void]$output.Add((Send-Line $serial 'bench cpu' 60))
         [void]$output.Add((Send-Line $serial 'bench mem' 120))
         [void]$output.Add((Send-Line $serial "bench disk $DiskPath" 40))
+        if ($WriteFile) { [void]$output.Add((Send-Line $serial "bench write $WriteFile" 60)) }
         if ($Net) {
             $status = Send-Line $serial 'wifi' 5
             $address = [regex]::Match($status, 'ip_address=(\S+)').Groups[1].Value

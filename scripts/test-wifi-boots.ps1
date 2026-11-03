@@ -1,6 +1,7 @@
 # Boots target/a32-boot.img from RAM again and again, and records whether the init
-# started Wi-Fi by itself. Flash is not written, and no network is joined, except
-# that -JoinFailure tries a network that should not exist, with a made-up passphrase.
+# started Wi-Fi, and rejoined the saved network if there is one. Flash is not written,
+# and only -JoinFailure joins by itself: it tries a network that should not exist,
+# with a made-up passphrase.
 #
 # The console must be running on the phone before this starts. Scan results are
 # only counted, so the names of nearby networks do not end up in the records.
@@ -9,6 +10,7 @@ param(
     [string]$Port = 'COM3',
     [string]$OutFile = 'target/wifi-boots.csv',
     [int]$StartupSeconds = 90,
+    [int]$JoinSeconds = 45,
     [switch]$JoinFailure
 )
 
@@ -83,7 +85,12 @@ function Measure-Boot($Serial) {
         if ($state -notmatch 'starting') { break }
         Start-Sleep -Seconds 2
     }
+    $joined = $false
+    if ($state -eq 'ready' -and (Send-Line $Serial 'ls /data/a32') -match 'wifi-network') {
+        $joined = Wait-Until { (Send-Line $Serial 'wifi') -match 'ip_address=' -and (Send-Line $Serial 'cat /run/init.log') -match 'time: set' } $JoinSeconds
+    }
     $init = Send-Line $Serial 'cat /run/init.log'
+    $status = Send-Line $Serial 'wifi'
     $started = [regex]::Match($init, 'wifi: started in (\d+) s').Groups[1].Value
     $attempt = [regex]::Match($init, 'after power on attempt (\d+)').Groups[1].Value
     $uptime = ((Send-Line $Serial 'cat /proc/uptime') -split ' ')[0]
@@ -100,6 +107,12 @@ function Measure-Boot($Serial) {
         PowerAttempt = $attempt
         Uptime = $uptime
         Networks = $networks
+        Joined = $joined
+        JoinedAt = [regex]::Match($init, '\[([\d.]+)\] wifi: connected').Groups[1].Value
+        ClockSetAt = [regex]::Match($init, '\[([\d.]+)\] time: set').Groups[1].Value
+        Mac = [regex]::Match($status, '(?m)^address=(\S+)').Groups[1].Value
+        Address = [regex]::Match($status, 'ip_address=(\S+)').Groups[1].Value
+        Data = $init -match 'data: mounted'
         Touch = $touch
     }
 }

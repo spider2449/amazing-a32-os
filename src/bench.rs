@@ -1,7 +1,8 @@
 //! Repeatable performance measurements, run from the console.
 //!
 //! Each result is one line, `NAME key=value ...`, so that results from different
-//! builds and devices can be compared. Nothing here writes to storage.
+//! builds and devices can be compared. Only `bench write` writes to storage, to a
+//! new file that it removes again.
 
 use std::hint::black_box;
 use std::io::{self, Read, Write};
@@ -41,12 +42,14 @@ pub fn run(arguments: &[&str]) -> io::Result<String> {
         ["mem"] => Ok(memory()),
         #[cfg(target_os = "linux")]
         ["disk", path] => disk(path),
+        #[cfg(target_os = "linux")]
+        ["write", path] => disk_write(path),
         ["net", port] => net(number(port)? as u16, NET_DEFAULT_SECONDS),
         ["net", port, seconds] => net(number(port)? as u16, number(seconds)?),
         ["load", seconds] => Ok(load(Duration::from_secs(number(seconds)?))),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: bench cpu | mem | disk PATH | net PORT [SECONDS] | load SECONDS",
+            "usage: bench cpu | mem | disk PATH | write NEW_FILE | net PORT [SECONDS] | load SECONDS",
         )),
     }
 }
@@ -239,18 +242,80 @@ fn memory() -> String {
     report
 }
 
+// The value on 32-bit ARM, the only supported target. It differs elsewhere.
+#[cfg(target_os = "linux")]
+const O_DIRECT: i32 = 0o200000;
+#[cfg(target_os = "linux")]
+const ALIGNMENT: usize = 4096;
+#[cfg(target_os = "linux")]
+const SEQUENTIAL_BLOCK: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
+const DISK_TIME: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const WRITE_FILE_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Writes a new file past the page cache, in sequence and at random, then removes
+/// it. Each rate includes the final flush to the eMMC. It refuses an existing file.
+#[cfg(target_os = "linux")]
+fn disk_write(path: &str) -> io::Result<String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{FileExt, OpenOptionsExt};
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .custom_flags(O_DIRECT)
+        .open(path)?;
+    let result = (|| {
+        let data = random_bytes(SEQUENTIAL_BLOCK + ALIGNMENT);
+        let skip = data.as_ptr().align_offset(ALIGNMENT);
+        let block = &data[skip..skip + SEQUENTIAL_BLOCK];
+
+        let mut failure = None;
+        let mut size = 0u64;
+        let start = Instant::now();
+        while start.elapsed() < DISK_TIME && size < WRITE_FILE_LIMIT {
+            if let Err(err) = file.write_all_at(block, size) {
+                failure = Some(err);
+                break;
+            }
+            size += SEQUENTIAL_BLOCK as u64;
+        }
+        file.sync_all()?;
+        let sequential = size as f64 / start.elapsed().as_secs_f64() / 1e6;
+        if let Some(err) = failure {
+            return Err(err);
+        }
+
+        let pages = size / ALIGNMENT as u64;
+        let mut state = 0x6132_0004;
+        let mut writes = 0u64;
+        let start = Instant::now();
+        while start.elapsed() < DISK_TIME {
+            let position = u64::from(xorshift(&mut state)) % pages * ALIGNMENT as u64;
+            file.write_all_at(&block[..ALIGNMENT], position)?;
+            writes += 1;
+        }
+        file.sync_all()?;
+        let random = writes as f64 / start.elapsed().as_secs_f64();
+
+        Ok(format!(
+            "disk.write_sequential block_kib=1024 bytes={size} value={sequential:.1} unit=MB/s
+disk.write_random block_kib=4 value={random:.0} unit=IOPS
+"
+        ))
+    })();
+    std::fs::remove_file(path)?;
+    result
+}
+
 /// Reads a block device past the page cache, in sequence and at random.
 #[cfg(target_os = "linux")]
 fn disk(path: &str) -> io::Result<String> {
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom};
     use std::os::unix::fs::{FileExt, OpenOptionsExt};
-
-    // The value on 32-bit ARM, the only supported target. It differs elsewhere.
-    const O_DIRECT: i32 = 0o200000;
-    const ALIGNMENT: usize = 4096;
-    const SEQUENTIAL_BLOCK: usize = 1024 * 1024;
-    const DISK_TIME: Duration = Duration::from_secs(5);
 
     let mut file = OpenOptions::new().read(true).custom_flags(O_DIRECT).open(path)?;
     let size = file.seek(SeekFrom::End(0))?;

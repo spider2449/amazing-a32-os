@@ -36,8 +36,31 @@ find FUSE, ext2 or ext3, which are all available.
 | Listening sockets | None on TCP, TCP6 or UDP, measured after Wi-Fi joined a network |
 
 Partition sizes in MiB: `userdata` 3631, `system` 3072, `cache` 400, `metadata` 37,
-`nvdata` 32, `boot` 16, `recovery` 16. `nvram` and `nvdata` are the likely home of
-the MAC address and radio calibration, so nothing should write to them.
+`nvdata` 32, `boot` 16, `recovery` 16. `nvdata` holds the Wi-Fi MAC address and
+calibration, and `nvram` probably holds similar data, so nothing should write to them.
+
+## Storage
+
+`userdata` is formatted as ext4 and mounted on `/data`, after `e2fsck -p`. This erased
+Android's data. Formatting is a manual step, and the init never does it, so a passing
+fault cannot erase `/data`. If the mount fails, the system runs and saves nothing.
+
+Back up the small partitions before writing to anything. This took about 11 minutes
+for 18 partitions, and works from the phone's own partition table. `proinfo`, `nvram`
+and `nvdata` were then read a second time and matched:
+
+```powershell
+scripts/backup-partitions.ps1
+```
+
+Then, on the console, after checking the partition's name and size in
+`/sys/class/block`:
+
+```text
+sh mke2fs -t ext4 -L a32data DEVICE
+```
+
+Power cuts while writing to `/data` have not been tested.
 
 ## Performance
 
@@ -75,11 +98,26 @@ so no slowdown appeared. The CPU rose from 47.1 to 51.9 C and the battery from 3
 temperature it settles at. `bench load` stops at 85 C on the CPU or 45 C on the
 battery, because of the next point.
 
-All thermal zones read `disabled`, because the stock service that sets them up does
-not run. Do not assume the kernel slows the CPU when it gets hot. This has not been
-tested at high temperature.
+All thermal zones read `disabled`, presumably because the stock service that sets them
+up does not run. Do not assume the kernel slows the CPU when it gets hot, so the init
+has its own thermal service.
 
-Not measured: eMMC writes, USB networking, power use, and running on battery.
+eMMC writes go to a new file on `/data`, past the page cache, and vary much more than
+reads. `bench write` runs for 5 seconds per test. Over 9 runs, sequential writes were
+about 16 MB/s in 4, with 0.4, 7.3, 12.7, 14.7 and 23.9 MB/s in the others. Random 4 KiB
+writes were 2255 to 2574 IOPS in 7, and 1224 and 1312 in the others. Disk counters
+showed no other writer in the 6 runs where they were recorded, so the eMMC's own
+housekeeping is a possible cause, but this was not proven. A service should not count
+on steady write speed.
+
+The thermal service caps the CPU at 637 MHz at 80 C and releases it at 70 C. An image
+built with `A32_CPU_CAP_C=50`, for testing only, capped at 50.6 C under load: the
+speed fell from 245 to 142 MB/s, the CPU settled near 45 C, and it released at 39.8 C.
+At 95 C on the CPU or 55 C on the battery the phone powers off. That has not been
+tested, and neither has the cap at its real limit. With USB attached the phone starts
+again by itself after powering off.
+
+Not measured: USB networking, power use, and running on battery.
 
 ## Firmware
 
@@ -248,31 +286,53 @@ Open problems:
 ## Wi-Fi
 
 The init starts Wi-Fi by itself, using the stock programs and firmware from the
-read-only `/system`, and stops short of joining a network. `/run/wifi-state` reads
-`starting`, `ready`, `failed: REASON` or `off: low battery`. A failure leaves the
-console running, and low battery charger mode skips Wi-Fi.
+read-only `/system`, and joins the saved network if there is one. `/run/wifi-state`
+reads `starting`, `ready`, `failed: REASON` or `off: low battery`. A failure leaves
+the console running, and low battery charger mode skips Wi-Fi.
 
-To join a WPA2 network, on the console:
+To join a WPA2 network, and keep it for later starts, on the console:
 
 ```text
 wifi join SSID PASSPHRASE
 wifi
+wifi forget
 ```
 
-Use double quotes around a value with spaces. The details stay in memory only, so
-this must be repeated after each restart. They are not put in the image, not sent
-through a shell and not logged. If joining fails, the network is removed again.
-The console echoes what is typed back to the connected computer.
+Use double quotes around a value with spaces. The details are saved only after
+joining works, so a mistyped passphrase does not replace a good one, but a failed
+join does leave the phone off the network until the next restart.
+
+**The passphrase is stored unencrypted** in `/data/a32/wifi-network`, readable only by
+root. Anyone who can reach the console or read the eMMC can get it. It is not put in
+the image, not sent through a shell and not logged. `wifi forget` removes the file,
+but flash storage may keep old data. The console echoes what is typed back to the
+connected computer.
+
+While connected, the init renews the lease halfway through, and gets a new one after
+a lost connection. The address is left alone if it did not change, so open
+connections survive. `/etc/resolv.conf` follows the DNS server of the lease. The
+clock is set by SNTP after connecting and every 6 hours, and saved in the RTC.
 
 Test results, all from RAM boots restarted through fastboot with USB attached:
 
-- 11 of 11 boots reached `ready` in 11 seconds, on the first power on attempt.
+- 10 of 10 boots with a saved network joined about 28.5 seconds after the kernel
+  started, with the clock set about 0.4 seconds later. All had the same MAC and IP
+  addresses, `/data` mounted and `/dev/touch`.
+- After deleting the calibration copy, a restart restored it from `nvdata`.
+- 12 of 12 pings were answered during a lease renewal, with the same address.
+- After `wpa_cli disconnect` then `reconnect`, the phone got a lease and reached
+  8.8.8.8 again. This is not the same as losing the access point, which is untested.
+- A wrong passphrase left the saved file unchanged, and was not found in `/run`,
+  `/data` or the kernel log. After `wifi forget` a restart stayed off the network.
+- A name resolved and TCP connected to it. The clock read within about 2 seconds of
+  the PC, which is about the delay between the two readings.
+- 11 of 11 earlier boots reached `ready` in 11 seconds, on the first power on attempt.
   Each one then scanned and found 14 to 21 networks, and had `/dev/touch`.
 - `wifi join` with a network that does not exist, tried twice, reported the failure
   and left no network configured. The passphrase was not found in `/run` or in the
   kernel log.
 
-To repeat this, which does not write to flash or join a real network:
+To repeat the boot tests, which do not write to flash. A saved network is rejoined:
 
 ```powershell
 scripts/test-wifi-boots.ps1 -Count 10 -JoinFailure
@@ -292,13 +352,16 @@ scripts/test-wifi-boots.ps1 -Count 10 -JoinFailure
   session, the phone's routing is not the likely cause, but the actual cause is not
   known. Other devices may meet the same hotspot behavior.
 
-`tcp ADDRESS:PORT` on the console tries a TCP connection, because the stock system
-has no `nc`. `tcpdump` is in `/system/xbin`.
+`tcp HOST:PORT` on the console tries a TCP connection, because the stock system has
+no `nc`. `tcpdump` is in `/system/xbin`.
 
 Not tested:
 
 - A start without USB, and running on battery with Wi-Fi on.
-- Name resolution, renewing the lease, and running for longer than 2 hours.
+- A renewal at its real time, which is 36 hours away on this network. It was tested
+  through the `dhcp` command, which runs the same code.
+- HTTPS, because the phone has no TLS client yet. Only the clock it needs was checked.
+- Running for longer than 2 hours.
 
 To record a network over time, which never joins or restarts anything:
 
@@ -324,7 +387,8 @@ The init runs these steps, in this order:
 5. Run `ip link set wlan0 up`, then `wpa_supplicant`.
 
 `wifi join` then adds the network with `wpa_cli` and gets an address. The stock
-system has no DHCP client program, so this one is written in Rust.
+system has no DHCP client program, so this one is written in Rust. `wmt_loader` ends
+with status 255 on every boot seen, and Wi-Fi works anyway. The reason is not known.
 
 Requirements found on the way, which other devices may share:
 
@@ -335,9 +399,12 @@ Requirements found on the way, which other devices may share:
   output if it cannot create its control socket. Its directory and
   `/data/misc/wifi/sockets` must belong to that user.
 
-`/data` is not mounted, so the phone does not use its own MAC address: it changed
-between boots, from `00:08:22:80:06:fc` to `00:08:22:c2:9d:04`. A network that
-filters or reserves by MAC address will see a new device after each boot.
+- The Wi-Fi driver reads its MAC address and calibration from
+  `/data/nvram/APCFG/APRDEB/WIFI`, with the MAC address at offset 4. Without that file
+  it makes up an address on each start. The stock system restores the file from the
+  `nvdata` partition, and the init copies it once, mounting `nvdata` read-only.
+- Setting the address with `ip link set wlan0 address` after power on did not change
+  it. Whether this failed or the driver replaced it was not determined.
 
 The `sh LINE` console command runs a line with the stock shell.
 

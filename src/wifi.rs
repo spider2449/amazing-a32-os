@@ -79,6 +79,31 @@ fn split_words(text: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+impl Credentials {
+    /// The form kept on storage, which `from_saved` reads back.
+    pub fn to_saved(&self) -> String {
+        format!("{}\n{}\n", self.ssid, self.psk)
+    }
+
+    pub fn from_saved(text: &str) -> Option<Self> {
+        let (ssid, psk) = text.strip_suffix('\n')?.split_once('\n')?;
+        let valid_ssid = !ssid.is_empty()
+            && ssid.len() <= SSID_MAX_BYTES * 2
+            && ssid.len() % 2 == 0
+            && ssid.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let valid_psk = psk.len() >= 2 && psk.starts_with('"') && psk.ends_with('"');
+        (valid_ssid && valid_psk)
+            .then(|| Self { ssid: ssid.to_string(), psk: psk.to_string() })
+    }
+}
+
+/// How long until a lease should be renewed: halfway, as DHCP recommends.
+pub fn renew_after(lease_seconds: Option<u32>) -> u64 {
+    const DEFAULT_LEASE: u64 = 3600;
+    const SHORTEST_WAIT: u64 = 60;
+    (lease_seconds.map_or(DEFAULT_LEASE, u64::from) / 2).max(SHORTEST_WAIT)
+}
+
 /// Finds `wpa_state` in the output of `wpa_cli status`.
 pub fn wpa_state(status: &str) -> Option<&str> {
     status.lines().find_map(|line| line.strip_prefix("wpa_state="))
@@ -140,6 +165,31 @@ mod tests {
         assert!(join(&format!("net {}", "p".repeat(63))).is_ok());
         assert!(join(&format!("net {}", "p".repeat(64))).is_err());
         assert!(join("net pässword1").is_err());
+    }
+
+    #[test]
+    fn saved_credentials_read_back() {
+        let saved = parse_join("net password1").unwrap().to_saved();
+        assert_eq!(saved, "6e6574\n\"password1\"\n");
+        let read = Credentials::from_saved(&saved).unwrap();
+        assert_eq!((read.ssid.as_str(), read.psk.as_str()), ("6e6574", "\"password1\""));
+    }
+
+    #[test]
+    fn rejects_damaged_saved_credentials() {
+        assert!(Credentials::from_saved("").is_none());
+        assert!(Credentials::from_saved("6e6574\n").is_none());
+        assert!(Credentials::from_saved("6e6574\npassword1\n").is_none());
+        assert!(Credentials::from_saved("6e657\n\"password1\"\n").is_none());
+        assert!(Credentials::from_saved("zz\n\"password1\"\n").is_none());
+        assert!(Credentials::from_saved("6e6574\n\"password1\"").is_none());
+    }
+
+    #[test]
+    fn renews_halfway_through_a_lease() {
+        assert_eq!(renew_after(Some(259_200)), 129_600);
+        assert_eq!(renew_after(Some(10)), 60);
+        assert_eq!(renew_after(None), 1800);
     }
 
     #[test]

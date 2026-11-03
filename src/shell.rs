@@ -3,7 +3,7 @@
 use crate::wifi::{self, Credentials};
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,10 +21,12 @@ const HELP: &str = "commands:
   sh LINE                      run a line with the stock shell in /system
   dhcp INTERFACE               get an address for a network interface
   wifi                         show the Wi-Fi state
-  wifi join SSID PASSPHRASE    join a WPA2 network until the next restart;
+  wifi join SSID PASSPHRASE    join a WPA2 network and keep it for later starts;
                                use double quotes around a value with spaces
-  tcp ADDRESS:PORT             try a TCP connection to an IP address
+  wifi forget                  leave the network and erase its saved details
+  tcp HOST:PORT                try a TCP connection
   bench cpu|mem|disk PATH      measure performance
+  bench write NEW_FILE         measure writes to a new file, then remove it
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
   poweroff[SECONDS]           turn the phone off, optionally after a delay
@@ -47,6 +49,8 @@ pub trait Platform {
     fn wifi_status(&self) -> io::Result<String>;
     /// Joins a network, gets an address and describes the result.
     fn wifi_join(&self, credentials: &Credentials) -> io::Result<String>;
+    /// Leaves the network and erases its saved details.
+    fn wifi_forget(&self) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -90,6 +94,7 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         }
         ["dhcp", interface] => platform.dhcp(interface).and_then(|text| writeln!(out, "{text}")),
         ["wifi"] => platform.wifi_status().and_then(|text| writeln!(out, "{text}")),
+        ["wifi", "forget"] => platform.wifi_forget().and_then(|text| writeln!(out, "{text}")),
         ["wifi", "join", ..] => {
             let rest = line.strip_prefix("wifi").unwrap_or(line).trim_start();
             let rest = rest.strip_prefix("join").unwrap_or(rest);
@@ -124,12 +129,14 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
 
 /// Reports whether a TCP connection opens. No data is sent.
 fn try_tcp(address: &str, out: &mut impl Write) -> io::Result<()> {
-    let address: SocketAddr = address
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad address"))?;
+    // Names are resolved first, so the time below only covers the connection.
+    let target = address
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::other("the name has no address"))?;
     let start = Instant::now();
-    TcpStream::connect_timeout(&address, TCP_TIMEOUT)?;
-    writeln!(out, "connected in {} ms", start.elapsed().as_millis())
+    TcpStream::connect_timeout(&target, TCP_TIMEOUT)?;
+    writeln!(out, "connected to {target} in {} ms", start.elapsed().as_millis())
 }
 
 fn list(path: &str, out: &mut impl Write) -> io::Result<()> {
@@ -185,6 +192,10 @@ mod tests {
             Ok(format!("joined {}", credentials.ssid))
         }
 
+        fn wifi_forget(&self) -> io::Result<String> {
+            Ok("forgotten".into())
+        }
+
         fn dhcp(&self, interface: &str) -> io::Result<String> {
             Ok(format!("lease on {interface}"))
         }
@@ -236,26 +247,23 @@ mod tests {
         assert!(session("wifi  join  \"a b\"  password1\n").0.contains("joined 612062"));
         assert!(session("wifi join net short\n").0.contains("error: the passphrase"));
         assert!(session("wifi join\n").0.contains("error: usage"));
+        assert!(session("wifi forget\n").0.contains("forgotten"));
         assert!(session("wifi leave\n").0.contains("unknown command"));
     }
 
     #[test]
     fn bench_passes_its_arguments() {
-        assert!(session("bench disk /dev/system
-").0.contains(r#"["disk", "/dev/system"]"#));
+        assert!(session("bench disk /dev/system\n").0.contains(r#"["disk", "/dev/system"]"#));
     }
 
     #[test]
     fn tcp_reports_the_connection() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        assert!(session(&format!("tcp {address}
-")).0.contains("connected in"));
+        assert!(session(&format!("tcp {address}\n")).0.contains("connected to"));
         drop(listener);
-        assert!(session(&format!("tcp {address}
-")).0.contains("error:"));
-        assert!(session("tcp nowhere
-").0.contains("error: bad address"));
+        assert!(session(&format!("tcp {address}\n")).0.contains("error:"));
+        assert!(session("tcp nowhere\n").0.contains("error:"));
     }
 
     #[test]

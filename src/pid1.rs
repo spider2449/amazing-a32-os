@@ -13,19 +13,22 @@ use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
 use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
+use crate::sntp;
+use crate::thermal::{self, Action as ThermalAction};
 use crate::usb;
 use crate::wifi;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr, ToSocketAddrs, UdpSocket};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, RwLock};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -48,6 +51,7 @@ extern "C" {
         value: *const c_void,
         length: c_uint,
     ) -> c_int;
+    fn umount(target: *const c_char) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -62,14 +66,16 @@ extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
 }
 
+const WNOHANG: c_int = 1;
 const S_IFCHR: c_uint = 0o020000;
 const S_IFBLK: c_uint = 0o060000;
 const SERIAL_DEVICE: &str = "/dev/ttyGS0";
 
-// Partitions exposed as /dev/NAME so that the console can back them up. Nothing
-// in this system writes to them.
+// Partitions exposed as /dev/NAME so that the console can back them up. Only
+// `userdata` is written to, through the filesystem mounted on /data. `nvdata` holds
+// calibration that cannot be restored from firmware, and is only mounted read-only.
 const SYS_BLOCK: &str = "/sys/class/block";
-const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery", "system"];
+const EXPOSED_PARTITIONS: &[&str] = &["boot", "recovery", "system", "userdata", "nvdata"];
 const SERIAL_WAIT_SECONDS: u32 = 30;
 // Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
 const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
@@ -91,7 +97,6 @@ const PROPERTY_AREA: &str = "/dev/__properties__";
 // `wmt_loader` cannot set this one itself without a property service, and
 // `wmt_launcher` appears to wait for it.
 const STOCK_PROPERTIES: &[(&str, &str)] = &[("service.wcn.driver.ready", "yes")];
-const ECHILD: i32 = 10;
 const STOCK_IP: &str = "/system/bin/ip";
 // The state of the Wi-Fi startup. Network details are never written here.
 const WIFI_STATE: &str = "/run/wifi-state";
@@ -128,6 +133,47 @@ const WIFI_SCAN_DELAY: Duration = Duration::from_secs(6);
 const WIFI_JOIN_WAIT: Duration = Duration::from_secs(30);
 const WPA_COMPLETED: &str = "COMPLETED";
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DATA_DEVICE: &str = "/dev/userdata";
+const DATA_DIR: &str = "/data";
+const E2FSCK: &str = "/system/bin/e2fsck";
+const E2FSCK_LOG: &str = "/run/e2fsck.log";
+const MS_NOATIME: c_ulong = 1024;
+// Settings kept across restarts. The directory is private, because the saved
+// network holds a passphrase.
+const SETTINGS_DIR: &str = "/data/a32";
+const SAVED_NETWORK: &str = "/data/a32/wifi-network";
+// The Wi-Fi driver reads its MAC address and calibration from these files. The stock
+// system restores them from the `nvdata` partition, and without them the driver
+// makes up an address on each start.
+const NVDATA_DEVICE: &str = "/dev/nvdata";
+const NVDATA_MOUNT: &str = "/run/nvdata";
+const WIFI_CALIBRATION_SOURCE: &str = "/run/nvdata/APCFG/APRDEB";
+const WIFI_CALIBRATION_TARGET: &str = "/data/nvram/APCFG/APRDEB";
+const WIFI_CALIBRATION_FILES: &[&str] = &["WIFI", "WIFI_CUSTOM"];
+const RESOLV_CONF: &str = "/run/resolv.conf";
+const NETWORK_CHECK: Duration = Duration::from_secs(5);
+const LEASE_RETRY: Duration = Duration::from_secs(30);
+// Names first, and an address as a fallback if the DNS server fails.
+const TIME_SERVERS: &[&str] = &["time.google.com:123", "pool.ntp.org:123", "216.239.35.0:123"];
+const TIME_REPLY_WAIT: Duration = Duration::from_secs(5);
+const TIME_SYNC_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+const TIME_SYNC_RETRY: Duration = Duration::from_secs(60);
+const STOCK_HWCLOCK: &str = "/system/bin/hwclock";
+const SYS_RTC: &str = "/sys/class/rtc/rtc0/dev";
+const RTC_DEVICE: &str = "/dev/rtc0";
+const SYS_SETTIMEOFDAY: c_long = 79;
+const THERMAL_ZONES: &str = "/sys/class/thermal";
+const THERMAL_STATE: &str = "/run/thermal-state";
+const THERMAL_CHECK: Duration = Duration::from_secs(10);
+const CPU_ZONE: &str = "mtktscpu";
+const BATTERY_ZONE: &str = "mtktsbattery";
+const CPU_MAX_FREQUENCY: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
+const CPU_FREQUENCY_LIMIT: &str = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq";
+// One of the speeds this CPU lists, a little over half of the top speed.
+const CPU_CAPPED_KHZ: &str = "637000";
+const CPU_CAP_DEGREES: i64 = 80;
+// Replaces the limit in an image built to test the protection. Never flash one.
+const CPU_CAP_TEST_DEGREES: Option<&str> = option_env!("A32_CPU_CAP_C");
 const SOL_SOCKET: c_int = 1;
 const SO_BINDTODEVICE: c_int = 25;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -153,6 +199,27 @@ const FAIL_SAFE_DELAY: Duration = Duration::from_secs(3);
 /// Set when the console device exists. A host does not need to be attached, so
 /// running on battery without USB does not count as a failure.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
+
+/// Set when /data is a mounted filesystem, not a directory in memory.
+static DATA_READY: AtomicBool = AtomicBool::new(false);
+
+/// The address in use and when to renew it. Holding this also stops two DHCP
+/// exchanges from competing for the client port.
+struct LeaseState {
+    applied: Option<(Ipv4Addr, u32)>,
+    renew_at: Option<Instant>,
+}
+
+/// Held for reading while a child is being waited for, so that `reap_forever` does
+/// not collect it first and hide how it ended.
+static WAITED_CHILDREN: RwLock<()> = RwLock::new(());
+
+static LEASE: Mutex<LeaseState> = Mutex::new(LeaseState { applied: None, renew_at: None });
+
+/// A panic elsewhere must not leave networking locked for the rest of the session.
+fn lease_state() -> MutexGuard<'static, LeaseState> {
+    LEASE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A fault to inject for testing the fail-safe, chosen at build time with the
 /// `A32_FAULT` environment variable: `panic`, `usb` or `hang`.
@@ -229,6 +296,9 @@ pub fn run() -> ! {
     if let Err(err) = mount_system() {
         errors.push(format!("mount /system failed: {err}"));
     }
+    if let Err(err) = prepare_etc() {
+        errors.push(format!("/etc failed: {err}"));
+    }
     if let Err(err) = write_property_area() {
         errors.push(format!("property area failed: {err}"));
     }
@@ -257,8 +327,11 @@ pub fn run() -> ! {
     if let Err(err) = thread::Builder::new().spawn(power_key) {
         log(&format!("power key thread failed: {err}"));
     }
-    if let Err(err) = thread::Builder::new().spawn(wifi_service) {
-        log(&format!("wifi thread failed: {err}"));
+    if let Err(err) = thread::Builder::new().spawn(thermal_service) {
+        log(&format!("thermal thread failed: {err}"));
+    }
+    if let Err(err) = thread::Builder::new().spawn(storage_and_network) {
+        log(&format!("network thread failed: {err}"));
     }
 
     log("boot complete");
@@ -404,21 +477,313 @@ fn run_power_key() -> io::Result<()> {
     }
 }
 
-/// Starts Wi-Fi as far as `wpa_supplicant`. A failure leaves the rest running, and
-/// joining a network is left to the console.
-fn wifi_service() {
+/// Mounts /data, starts Wi-Fi, then keeps the network working. This runs apart from
+/// the console, so that a slow or stuck step cannot take away the way to fastboot.
+fn storage_and_network() {
+    match mount_data() {
+        Ok(()) => {
+            DATA_READY.store(true, Ordering::Release);
+            log("data: mounted");
+            if let Err(err) = restore_wifi_calibration() {
+                log(&format!("wifi: no calibration from nvdata: {err}"));
+            }
+        }
+        // Never formatted here: that would erase /data after any passing fault.
+        Err(err) => log(&format!("data: not mounted, nothing will be saved: {err}")),
+    }
+
     if fs::read_to_string(BOOT_MODE).is_ok_and(|mode| mode.trim() == LOW_BATTERY_BOOT_MODE) {
         set_wifi_state("off: low battery");
         return;
     }
     set_wifi_state("starting");
     let start = Instant::now();
-    match start_wifi() {
-        Ok(()) => {
-            log(&format!("wifi: started in {} s", start.elapsed().as_secs()));
-            set_wifi_state(WIFI_READY);
+    if let Err(err) = start_wifi() {
+        set_wifi_state(&format!("failed: {err}"));
+        return;
+    }
+    log(&format!("wifi: started in {} s", start.elapsed().as_secs()));
+    set_wifi_state(WIFI_READY);
+    keep_network_working();
+}
+
+fn mount_data() -> io::Result<()> {
+    let check = run_child(logged_command(E2FSCK, E2FSCK_LOG)?.args(["-p", DATA_DEVICE]))?;
+    // Codes 1 and 2 mean it fixed something. Others are left to the mount below.
+    if !check.success() {
+        log(&format!("data: e2fsck ended with {check}, see {E2FSCK_LOG}"));
+    }
+    fs::create_dir_all(DATA_DIR)?;
+    let source = cstring(DATA_DEVICE)?;
+    let target = cstring(DATA_DIR)?;
+    let fstype = cstring("ext4")?;
+    // SAFETY: all pointers are valid NUL-terminated strings for the call duration.
+    let rc = unsafe {
+        mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), MS_NOATIME, ptr::null())
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    fs::create_dir_all(SETTINGS_DIR)?;
+    fs::set_permissions(SETTINGS_DIR, fs::Permissions::from_mode(0o700))
+}
+
+/// Copies the Wi-Fi calibration out of `nvdata` the first time. A failure only means
+/// the driver makes up a MAC address and uses its default calibration.
+fn restore_wifi_calibration() -> io::Result<()> {
+    let target = Path::new(WIFI_CALIBRATION_TARGET);
+    if WIFI_CALIBRATION_FILES.iter().all(|name| target.join(name).exists()) {
+        return Ok(());
+    }
+    fs::create_dir_all(target)?;
+    fs::create_dir_all(NVDATA_MOUNT)?;
+    let source = cstring(NVDATA_DEVICE)?;
+    let mount_point = cstring(NVDATA_MOUNT)?;
+    let fstype = cstring("ext4")?;
+    let options = cstring(SYSTEM_MOUNT_OPTIONS)?;
+    // SAFETY: all pointers are valid NUL-terminated strings for the call duration.
+    let rc = unsafe {
+        mount(
+            source.as_ptr(),
+            mount_point.as_ptr(),
+            fstype.as_ptr(),
+            MS_RDONLY,
+            options.as_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let copied = WIFI_CALIBRATION_FILES.iter().try_for_each(|name| {
+        fs::copy(Path::new(WIFI_CALIBRATION_SOURCE).join(name), target.join(name)).map(|_| ())
+    });
+    // SAFETY: `mount_point` is a valid NUL-terminated string for the call duration.
+    if unsafe { umount(mount_point.as_ptr()) } != 0 {
+        log(&format!("wifi: could not unmount nvdata: {}", io::Error::last_os_error()));
+    }
+    copied?;
+    // SAFETY: `sync` takes no arguments and has no memory safety requirements.
+    unsafe { sync() };
+    log("wifi: copied the calibration from nvdata");
+    Ok(())
+}
+
+/// Replaces a file in one step, so that a power cut leaves the old or the new one.
+fn write_private_file(path: &str, contents: &str) -> io::Result<()> {
+    let temporary = format!("{path}.new");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    File::open(SETTINGS_DIR)?.sync_all()
+}
+
+fn load_saved_network() -> Option<wifi::Credentials> {
+    if !DATA_READY.load(Ordering::Acquire) {
+        return None;
+    }
+    let text = fs::read_to_string(SAVED_NETWORK).ok()?;
+    let credentials = wifi::Credentials::from_saved(&text);
+    if credentials.is_none() {
+        log("wifi: the saved network is damaged");
+    }
+    credentials
+}
+
+/// Rejoins the saved network, renews the lease and keeps the clock set.
+/// `wpa_supplicant` itself reconnects after a lost connection.
+fn keep_network_working() -> ! {
+    if let Some(credentials) = load_saved_network() {
+        log("wifi: joining the saved network");
+        // On a failure `wpa_supplicant` keeps the network and goes on trying.
+        if let Err(err) = join_network(&credentials) {
+            log(&format!("wifi: saved network not joined yet: {err}"));
         }
-        Err(err) => set_wifi_state(&format!("failed: {err}")),
+    }
+
+    let mut connected = false;
+    let mut next_time_sync = Instant::now();
+    loop {
+        let status = wpa_cli(&["status"]).unwrap_or_default();
+        let now_connected = wifi::wpa_state(&status) == Some(WPA_COMPLETED);
+        if now_connected != connected {
+            log(if now_connected { "wifi: connected" } else { "wifi: connection lost" });
+            connected = now_connected;
+        }
+        if !connected {
+            // The next connection may be to a different network.
+            lease_state().renew_at = None;
+        } else {
+            renew_lease_if_due();
+            if lease_state().applied.is_some() && Instant::now() >= next_time_sync {
+                next_time_sync = Instant::now()
+                    + match sync_clock() {
+                        Ok(()) => TIME_SYNC_INTERVAL,
+                        Err(err) => {
+                            log(&format!("time: {err}"));
+                            TIME_SYNC_RETRY
+                        }
+                    };
+            }
+        }
+        thread::sleep(NETWORK_CHECK);
+    }
+}
+
+fn renew_lease_if_due() {
+    let due = lease_state().renew_at.is_none_or(|time| Instant::now() >= time);
+    if !due {
+        return;
+    }
+    match renew_lease(WIFI_INTERFACE) {
+        Ok(text) => log(&format!("dhcp: {text}")),
+        Err(err) => {
+            log(&format!("dhcp: {err}"));
+            lease_state().renew_at = Some(Instant::now() + LEASE_RETRY);
+        }
+    }
+}
+
+/// Gets a lease and applies it. The address is left alone if it did not change,
+/// because removing it would break open connections.
+fn renew_lease(interface: &str) -> io::Result<String> {
+    let mut state = lease_state();
+    let lease = acquire_lease(interface)?;
+    let netmask = lease.netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
+    let prefix = dhcp::prefix_length(netmask)
+        .ok_or_else(|| io::Error::other(format!("bad netmask: {netmask}")))?;
+
+    if state.applied != Some((lease.address, prefix)) {
+        run_ip(&["addr", "flush", "dev", interface])?;
+        run_ip(&["addr", "add", &format!("{}/{prefix}", lease.address), "dev", interface])?;
+        state.applied = Some((lease.address, prefix));
+    }
+    if let Some(router) = lease.router {
+        run_ip(&["route", "replace", "default", "via", &router.to_string(), "dev", interface])?;
+    }
+    if let Some(dns) = lease.dns {
+        fs::write(RESOLV_CONF, format!("nameserver {dns}\n"))?;
+    }
+    let renew_seconds = wifi::renew_after(lease.lease_seconds);
+    state.renew_at = Some(Instant::now() + Duration::from_secs(renew_seconds));
+    Ok(format!(
+        "address {}/{prefix} router {:?} dns {:?} lease {:?} s, renewing in {renew_seconds} s",
+        lease.address, lease.router, lease.dns, lease.lease_seconds
+    ))
+}
+
+/// Sets the clock from the first time server that answers, then saves it in the
+/// RTC, so that the time is about right after a restart with no network.
+fn sync_clock() -> io::Result<()> {
+    let mut last_error = io::Error::other("no time server configured");
+    for server in TIME_SERVERS {
+        match ask_time_server(server) {
+            Ok(unix) => {
+                set_clock(unix)?;
+                let saved = save_clock_to_rtc();
+                log(&format!("time: set to {unix} from {server}, rtc saved: {saved:?}"));
+                return Ok(());
+            }
+            Err(err) => last_error = io::Error::other(format!("{server}: {err}")),
+        }
+    }
+    Err(last_error)
+}
+
+fn ask_time_server(server: &str) -> io::Result<u64> {
+    let target = server
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::other("the name has no address"))?;
+    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+    socket.set_read_timeout(Some(TIME_REPLY_WAIT))?;
+    socket.connect(target)?;
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0x6132_0003, |elapsed| elapsed.as_nanos() as u64);
+    socket.send(&sntp::build_request(nonce))?;
+    let mut reply = [0u8; sntp::MESSAGE_LEN];
+    let length = socket.recv(&mut reply)?;
+    sntp::parse_reply(&reply[..length], nonce)
+        .ok_or_else(|| io::Error::other("unusable reply"))
+}
+
+fn set_clock(unix: u64) -> io::Result<()> {
+    // This kernel's 32-bit `struct timeval`. `sntp::parse_reply` keeps `unix` in range.
+    let time: [i32; 2] = [unix as i32, 0];
+    // SAFETY: `time` is a valid timeval for the call duration, and the time zone
+    // argument may be null.
+    let rc = unsafe { syscall(SYS_SETTIMEOFDAY, time.as_ptr(), ptr::null::<c_void>()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn save_clock_to_rtc() -> io::Result<()> {
+    if !Path::new(RTC_DEVICE).exists() {
+        let dev = fs::read_to_string(SYS_RTC)?;
+        let (major, minor) = usb::parse_dev(&dev)
+            .ok_or_else(|| io::Error::other(format!("bad device number: {dev}")))?;
+        make_char_device(RTC_DEVICE, major, minor, 0o600)?;
+    }
+    let status = run_child(
+        stock_command(STOCK_HWCLOCK).args(["-w", "-u"]).stdout(Stdio::null()).stderr(Stdio::null()),
+    )?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("hwclock ended with {status}")))
+    }
+}
+
+/// Finds a thermal zone by its type and returns millidegrees.
+fn zone_temperature(wanted: &str) -> Option<i64> {
+    for entry in fs::read_dir(THERMAL_ZONES).ok()?.flatten() {
+        let path = entry.path();
+        if fs::read_to_string(path.join("type")).is_ok_and(|name| name.trim() == wanted) {
+            return fs::read_to_string(path.join("temp")).ok()?.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Slows the CPU when it is too hot, and as a last resort turns the phone off.
+fn thermal_service() {
+    let cap_at = CPU_CAP_TEST_DEGREES.and_then(|text| text.parse().ok()).unwrap_or(CPU_CAP_DEGREES);
+    let mut policy = thermal::Policy::new(cap_at);
+    loop {
+        let cpu = zone_temperature(CPU_ZONE);
+        let battery = zone_temperature(BATTERY_ZONE);
+        let result = match policy.decide(cpu, battery) {
+            ThermalAction::None => Ok(()),
+            ThermalAction::Cap => {
+                log(&format!("thermal: capping the CPU, cpu {cpu:?} battery {battery:?}"));
+                fs::write(CPU_FREQUENCY_LIMIT, CPU_CAPPED_KHZ)
+            }
+            ThermalAction::Release => {
+                log(&format!("thermal: releasing the CPU, cpu {cpu:?} battery {battery:?}"));
+                fs::read(CPU_MAX_FREQUENCY).and_then(|top| fs::write(CPU_FREQUENCY_LIMIT, top))
+            }
+            ThermalAction::PowerOff => {
+                log(&format!("thermal: powering off, cpu {cpu:?} battery {battery:?}"));
+                Err(KernelPlatform.power_off())
+            }
+        };
+        if let Err(err) = result {
+            log(&format!("thermal: action failed: {err}"));
+        }
+        let _ = fs::write(
+            THERMAL_STATE,
+            format!("capped: {}\ncpu: {cpu:?}\nbattery: {battery:?}\n", policy.is_capped()),
+        );
+        thread::sleep(THERMAL_CHECK);
     }
 }
 
@@ -430,12 +795,12 @@ fn set_wifi_state(state: &str) {
 /// Runs the steps the stock system runs, in the order that was tested by hand.
 fn start_wifi() -> io::Result<()> {
     fs::write(FIRMWARE_PATH_PARAMETER, FIRMWARE_DIR)?;
-    if !Path::new("/etc").exists() {
-        std::os::unix::fs::symlink("/system/etc", "/etc")?;
-    }
 
     make_wmt_devices()?;
-    wait_for_child(logged_command(WMT_LOADER, WMT_LOADER_LOG)?.status())?;
+    let loader = run_child(&mut logged_command(WMT_LOADER, WMT_LOADER_LOG)?)?;
+    if !loader.success() {
+        log(&format!("wifi: wmt_loader ended with {loader}"));
+    }
     let loaded = wait_until(WMT_LOADER_WAIT, || {
         make_wmt_devices().is_ok() && Path::new(WMT_WIFI_DEVICE).exists()
     });
@@ -542,17 +907,16 @@ fn logged_command(program: &str, log_path: &str) -> io::Result<Command> {
     Ok(command)
 }
 
-/// `reap_forever` may collect a child first, so that error means it has exited.
-fn wait_for_child(result: io::Result<std::process::ExitStatus>) -> io::Result<()> {
-    match result {
-        Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
-        _ => Ok(()),
-    }
+/// Runs a program to its end and returns how it ended.
+fn run_child(command: &mut Command) -> io::Result<ExitStatus> {
+    let _waiting = WAITED_CHILDREN.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    command.status()
 }
 
 /// Runs `wpa_cli` directly, without a shell, so that a passphrase needs no
 /// escaping. Its arguments are not logged for the same reason.
 fn wpa_cli(arguments: &[&str]) -> io::Result<String> {
+    let _waiting = WAITED_CHILDREN.read().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut child = stock_command(WPA_CLI)
         .args(["-p", WPA_CONTROL_DIR, "-i", WIFI_INTERFACE])
         .args(arguments)
@@ -563,7 +927,7 @@ fn wpa_cli(arguments: &[&str]) -> io::Result<String> {
     if let Some(mut stdout) = child.stdout.take() {
         stdout.read_to_end(&mut output)?;
     }
-    wait_for_child(child.wait())?;
+    child.wait()?;
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
@@ -760,12 +1124,11 @@ impl Platform for KernelPlatform {
         // Output goes to a file instead of a pipe, so that a background program
         // started by the line cannot keep this call waiting.
         let output = File::create(STOCK_SHELL_OUTPUT)?;
-        wait_for_child(
+        run_child(
             stock_command(STOCK_SHELL)
                 .args(["-c", line])
                 .stdout(output.try_clone()?)
-                .stderr(output)
-                .status(),
+                .stderr(output),
         )?;
         fs::read(STOCK_SHELL_OUTPUT)
     }
@@ -788,29 +1151,42 @@ impl Platform for KernelPlatform {
         if state.trim() != WIFI_READY {
             return Err(io::Error::other(format!("Wi-Fi is not ready: {}", state.trim())));
         }
-        let result = join_network(credentials).and_then(|()| self.dhcp(WIFI_INTERFACE));
-        if result.is_err() {
-            // Also clears the passphrase from `wpa_supplicant`, and stops its retries.
-            let _ = wpa_command(&["remove_network", "all"]);
+        let text = match join_network(credentials).and_then(|()| self.dhcp(WIFI_INTERFACE)) {
+            Ok(text) => text,
+            Err(err) => {
+                // Also clears the passphrase from `wpa_supplicant`, and stops its retries.
+                let _ = wpa_command(&["remove_network", "all"]);
+                return Err(err);
+            }
+        };
+        // Saved only now, so that a mistyped passphrase does not replace a good one.
+        let saved = if DATA_READY.load(Ordering::Acquire) {
+            write_private_file(SAVED_NETWORK, &credentials.to_saved())
+                .map_or_else(|err| format!("not saved: {err}"), |()| "saved".to_string())
+        } else {
+            "not saved: /data is not mounted".to_string()
+        };
+        Ok(format!("{text}\n{saved}"))
+    }
+
+    fn wifi_forget(&self) -> io::Result<String> {
+        match fs::remove_file(SAVED_NETWORK) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => {}
         }
-        result
+        if DATA_READY.load(Ordering::Acquire) {
+            File::open(SETTINGS_DIR)?.sync_all()?;
+        }
+        wpa_command(&["remove_network", "all"])?;
+        let mut state = lease_state();
+        state.renew_at = None;
+        state.applied = None;
+        run_ip(&["addr", "flush", "dev", WIFI_INTERFACE])?;
+        Ok("left the network and erased its saved details".to_string())
     }
 
     fn dhcp(&self, interface: &str) -> io::Result<String> {
-        let lease = acquire_lease(interface)?;
-        let netmask = lease.netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
-        let prefix = dhcp::prefix_length(netmask)
-            .ok_or_else(|| io::Error::other(format!("bad netmask: {netmask}")))?;
-
-        run_ip(&["addr", "flush", "dev", interface])?;
-        run_ip(&["addr", "add", &format!("{}/{prefix}", lease.address), "dev", interface])?;
-        if let Some(router) = lease.router {
-            run_ip(&["route", "replace", "default", "via", &router.to_string(), "dev", interface])?;
-        }
-        Ok(format!(
-            "address {}/{prefix} router {:?} dns {:?} lease {:?} s (not renewed)",
-            lease.address, lease.router, lease.dns, lease.lease_seconds
-        ))
+        renew_lease(interface)
     }
 
     fn power_off(&self) -> io::Error {
@@ -824,19 +1200,17 @@ impl Platform for KernelPlatform {
 
 /// Runs the stock `ip` program with its output discarded.
 fn run_ip(arguments: &[&str]) -> io::Result<()> {
-    let status = Command::new(STOCK_IP)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match status {
-        Ok(status) if !status.success() => {
-            Err(io::Error::other(format!("ip {arguments:?} failed: {status}")))
-        }
-        // `reap_forever` may collect the child first, which hides its exit status.
-        Err(err) if err.raw_os_error() != Some(ECHILD) => Err(err),
-        _ => Ok(()),
+    let status = run_child(
+        Command::new(STOCK_IP)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("ip {arguments:?} failed: {status}")))
     }
 }
 
@@ -933,6 +1307,20 @@ fn write_property_area() -> io::Result<()> {
     fs::set_permissions(PROPERTY_AREA, fs::Permissions::from_mode(0o444))
 }
 
+/// Makes a writable /etc with links into /system/etc, which stock programs read,
+/// and a link to the DNS settings, which change at run time.
+fn prepare_etc() -> io::Result<()> {
+    fs::create_dir_all("/etc")?;
+    for entry in fs::read_dir("/system/etc")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != "resolv.conf" {
+            std::os::unix::fs::symlink(entry.path(), Path::new("/etc").join(name))?;
+        }
+    }
+    std::os::unix::fs::symlink(RESOLV_CONF, "/etc/resolv.conf")
+}
+
 /// Mounts the stock system partition read-only, for its Wi-Fi programs and
 /// firmware. The rest of this system does not depend on it.
 fn mount_system() -> io::Result<()> {
@@ -1017,15 +1405,20 @@ fn log(message: &str) {
     }
 }
 
+/// Collects children nobody is waiting for, such as orphans. It skips a round while
+/// a child is being waited for, without queueing, so that it never delays others.
 fn reap_forever() -> ! {
     loop {
-        let mut status = 0;
-        // SAFETY: `status` is a valid writable c_int for the call duration.
-        let pid = unsafe { waitpid(-1, &mut status, 0) };
-        if pid < 0 {
-            // No children yet: avoid spinning.
-            thread::sleep(Duration::from_secs(1));
+        if let Ok(_nobody_waiting) = WAITED_CHILDREN.try_write() {
+            loop {
+                let mut status = 0;
+                // SAFETY: `status` is a valid writable c_int for the call duration.
+                if unsafe { waitpid(-1, &mut status, WNOHANG) } <= 0 {
+                    break;
+                }
+            }
         }
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
