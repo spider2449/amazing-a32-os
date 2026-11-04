@@ -19,6 +19,8 @@ const HELP: &str = "commands:
   reboot [bootloader|recovery] restart the phone
   reboot TARGET SECONDS        restart after a delay, to allow unplugging USB
   sh LINE                      run a line with the stock shell in /system
+  alpine LINE                  run a line with the shell of Alpine in /data/alpine
+  recv NEW_FILE PORT           save one connection's data; check it with dump
   dhcp INTERFACE               get an address for a network interface
   wifi                         show the Wi-Fi state
   wifi join SSID PASSPHRASE    join a WPA2 network and keep it for later starts;
@@ -41,6 +43,10 @@ pub trait Platform {
     fn power_off(&self) -> io::Error;
     /// Runs a line with the phone's stock shell and returns its output.
     fn run_stock_shell(&self, line: &str) -> io::Result<Vec<u8>>;
+    /// Runs a line with Alpine's shell and returns its output.
+    fn run_alpine(&self, line: &str) -> io::Result<Vec<u8>>;
+    /// Saves one incoming connection's data to a new file and returns its length.
+    fn receive_file(&self, path: &str, port: u16) -> io::Result<u64>;
     /// Gets a DHCP lease on an interface, applies it and describes the result.
     fn dhcp(&self, interface: &str) -> io::Result<String>;
     /// Runs a performance measurement and returns its results.
@@ -92,6 +98,16 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
             let rest = line.strip_prefix("sh").unwrap_or(line).trim();
             platform.run_stock_shell(rest).and_then(|output| out.write_all(&output))
         }
+        ["alpine", _, ..] => {
+            let rest = line.strip_prefix("alpine").unwrap_or(line).trim();
+            platform.run_alpine(rest).and_then(|output| out.write_all(&output))
+        }
+        ["recv", path, port] => match port.parse() {
+            Ok(port) => platform
+                .receive_file(path, port)
+                .and_then(|bytes| writeln!(out, "received {bytes} bytes")),
+            Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+        },
         ["dhcp", interface] => platform.dhcp(interface).and_then(|text| writeln!(out, "{text}")),
         ["wifi"] => platform.wifi_status().and_then(|text| writeln!(out, "{text}")),
         ["wifi", "forget"] => platform.wifi_forget().and_then(|text| writeln!(out, "{text}")),
@@ -184,6 +200,15 @@ mod tests {
 "))
         }
 
+        fn run_alpine(&self, line: &str) -> io::Result<Vec<u8>> {
+            Ok(format!("alpine ran [{line}]\n").into_bytes())
+        }
+
+        fn receive_file(&self, path: &str, port: u16) -> io::Result<u64> {
+            assert_eq!((path, port), ("/new", 5202));
+            Ok(7)
+        }
+
         fn wifi_status(&self) -> io::Result<String> {
             Ok("wifi state".into())
         }
@@ -254,6 +279,19 @@ mod tests {
     #[test]
     fn bench_passes_its_arguments() {
         assert!(session("bench disk /dev/system\n").0.contains(r#"["disk", "/dev/system"]"#));
+    }
+
+    #[test]
+    fn alpine_passes_the_rest_of_the_line_unchanged() {
+        assert!(session("alpine echo  'a b'\n").0.contains("alpine ran [echo  'a b']"));
+        assert!(session("alpine\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn recv_needs_a_valid_port() {
+        assert!(session("recv /new 5202\n").0.contains("received 7 bytes"));
+        assert!(session("recv /new soon\n").0.contains("error: bad number"));
+        assert!(session("recv /new\n").0.contains("unknown command"));
     }
 
     #[test]

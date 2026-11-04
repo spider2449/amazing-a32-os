@@ -62,6 +62,54 @@ sh mke2fs -t ext4 -L a32data DEVICE
 
 Power cuts while writing to `/data` have not been tested.
 
+## Alpine Linux and SSH
+
+Alpine runs in a chroot on `/data/alpine`, and the Rust init stays PID 1 outside it. So
+the console and the fail-safe do not depend on Alpine. `alpine LINE` on the console runs
+a line inside it. The init starts `sshd` once it is installed, and restarts it if it ends.
+
+To install, with the phone on a network this computer can reach:
+
+```powershell
+ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\a32"
+scripts/install-alpine.ps1 -Archive alpine-minirootfs-VERSION-armv7.tar.gz
+ssh -i "$env:USERPROFILE\.ssh\a32" root@PHONE_ADDRESS
+```
+
+First check the archive's SHA-256 and its GPG signature from alpinelinux.org. The script
+unpacks it on the computer, because the stock `gzip` could not decompress and `tar` has
+no `gunzip` to call. It sends the `.tar` with `recv`, which has no authentication, then
+reads the file back over the serial console and compares the hash before unpacking.
+
+SSH takes only keys for root. Test results, from RAM boots of Alpine 3.24.3:
+
+- A listed key logged in and got a terminal. An unlisted key, a removed key and a
+  password attempt were all refused.
+- HTTPS works: `apk` installed packages. With `curl`, a valid certificate verified. An
+  expired one and a wrong host name were refused, by certificate error. Other
+  `badssl.com` pages timed out or reset, so those results say nothing.
+- After `sshd` was killed, it answered again 6 seconds later. On 3 of 3 restarts it
+  started about 15 seconds after the kernel, before Wi-Fi joined at about 28.6 seconds.
+
+Known limits:
+
+- `/proc/mounts` lists paths from outside the chroot, so `df` prints errors for `/data`
+  and `/system`, and `df /` shows no size. Run `sh df -h /data` on the console instead.
+- `reboot` inside Alpine asks PID 1, which does not listen. `reboot -f` should work, but
+  this has not been tried.
+- OpenRC services do not run. Only `sshd` is started.
+
+## Firewall
+
+The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic
+is dropped, except replies to connections from the phone, ping, DHCP replies, and SSH from
+private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). All incoming IPv6 is
+dropped. `sshd` does not start unless all rules were applied. `recv` and `bench net` open
+their port only while they run. The `conntrack` match is missing here, but `state` works.
+
+From the PC, ping worked and a closed port did not connect. Refusing a public source
+address has not been tested, because that needs a test from outside the local network.
+
 ## Performance
 
 The `bench` console command measures the phone, and this saves the results to
@@ -360,7 +408,6 @@ Not tested:
 - A start without USB, and running on battery with Wi-Fi on.
 - A renewal at its real time, which is 36 hours away on this network. It was tested
   through the `dhcp` command, which runs the same code.
-- HTTPS, because the phone has no TLS client yet. Only the clock it needs was checked.
 - Running for longer than 2 hours.
 
 To record a network over time, which never joins or restarts anything:
@@ -419,7 +466,11 @@ This was tested with `poweroff` while USB was attached. The phone started twice,
 then ended in mode `0` with the console ready about 60 seconds later. Each start
 briefly showed USB ID `0E8D:2000`, which is MediaTek's preloader. With this system in
 the boot partition, 3 of 3 tries returned to mode `0` in about 60 seconds with Wi-Fi
-`ready`.
+`ready`. With the saved network in place, 3 more tries each rejoined it and set the
+clock about 29 seconds after the kernel started. A start without USB, by the power key,
+also rejoined and set the clock at about 29 seconds, and the phone answered pings from
+the PC. Plugging USB back in restored the console, and it charged. That is one replug,
+so it does not rule out the charging problem under Known risks.
 
 As a result the phone cannot stay off with USB attached. `poweroff` only stays off
 without USB.

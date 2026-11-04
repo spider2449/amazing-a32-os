@@ -8,6 +8,7 @@
 //! does it. So if this process panics or the console cannot start, it reboots to
 //! fastboot, where the system can be repaired. A kernel panic is not covered.
 
+use crate::alpine;
 use crate::dhcp::{self, MessageType};
 use crate::display::{status_lines, Canvas};
 use crate::fb::Framebuffer;
@@ -138,6 +139,8 @@ const DATA_DIR: &str = "/data";
 const E2FSCK: &str = "/system/bin/e2fsck";
 const E2FSCK_LOG: &str = "/run/e2fsck.log";
 const MS_NOATIME: c_ulong = 1024;
+pub const MS_BIND: c_ulong = 4096;
+pub const MS_REC: c_ulong = 16384;
 // Settings kept across restarts. The directory is private, because the saved
 // network holds a passphrase.
 const SETTINGS_DIR: &str = "/data/a32";
@@ -252,6 +255,8 @@ const REBOOT_CMD_POWER_OFF: c_ulong = 0x4321_fedc;
 /// Filesystems as (fstype, mount point). `/dev` must come first for logging.
 const MOUNTS: &[(&str, &str)] = &[
     ("tmpfs", "/dev"),
+    ("devpts", "/dev/pts"),
+    ("tmpfs", "/dev/shm"),
     ("proc", "/proc"),
     ("sysfs", "/sys"),
     ("tmpfs", "/run"),
@@ -262,6 +267,8 @@ const DEVICES: &[(&str, u32, u32, c_uint)] = &[
     ("/dev/null", 1, 3, 0o666),
     ("/dev/kmsg", 1, 11, 0o600),
     ("/dev/console", 5, 1, 0o600),
+    ("/dev/tty", 5, 0, 0o666),
+    ("/dev/ptmx", 5, 2, 0o666),
     ("/dev/zero", 1, 5, 0o666),
     ("/dev/random", 1, 8, 0o666),
     ("/dev/urandom", 1, 9, 0o666),
@@ -326,6 +333,9 @@ pub fn run() -> ! {
     }
     if let Err(err) = thread::Builder::new().spawn(power_key) {
         log(&format!("power key thread failed: {err}"));
+    }
+    if let Err(err) = thread::Builder::new().spawn(alpine::ssh_service) {
+        log(&format!("ssh thread failed: {err}"));
     }
     if let Err(err) = thread::Builder::new().spawn(thermal_service) {
         log(&format!("thermal thread failed: {err}"));
@@ -480,6 +490,11 @@ fn run_power_key() -> io::Result<()> {
 /// Mounts /data, starts Wi-Fi, then keeps the network working. This runs apart from
 /// the console, so that a slow or stuck step cannot take away the way to fastboot.
 fn storage_and_network() {
+    // Before the network starts. SSH stays off if this fails.
+    match alpine::apply_firewall() {
+        Ok(()) => log("firewall: ready"),
+        Err(err) => log(&format!("firewall: failed: {err}")),
+    }
     match mount_data() {
         Ok(()) => {
             DATA_READY.store(true, Ordering::Release);
@@ -889,7 +904,7 @@ fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
 }
 
 /// A stock program with the environment it expects.
-fn stock_command(program: &str) -> Command {
+pub fn stock_command(program: &str) -> Command {
     let mut command = Command::new(program);
     command
         .env("PATH", STOCK_PATH)
@@ -908,7 +923,7 @@ fn logged_command(program: &str, log_path: &str) -> io::Result<Command> {
 }
 
 /// Runs a program to its end and returns how it ended.
-fn run_child(command: &mut Command) -> io::Result<ExitStatus> {
+pub fn run_child(command: &mut Command) -> io::Result<ExitStatus> {
     let _waiting = WAITED_CHILDREN.read().unwrap_or_else(|poisoned| poisoned.into_inner());
     command.status()
 }
@@ -1134,7 +1149,23 @@ impl Platform for KernelPlatform {
     }
 
     fn bench(&self, arguments: &[&str]) -> io::Result<String> {
-        crate::bench::run(arguments)
+        match arguments {
+            ["net", port, ..] => {
+                let port = port.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "bad number")
+                })?;
+                alpine::with_open_port(port, || crate::bench::run(arguments))
+            }
+            _ => crate::bench::run(arguments),
+        }
+    }
+
+    fn run_alpine(&self, line: &str) -> io::Result<Vec<u8>> {
+        alpine::run_line(line)
+    }
+
+    fn receive_file(&self, path: &str, port: u16) -> io::Result<u64> {
+        alpine::with_open_port(port, || crate::transfer::receive(path, port))
     }
 
     fn wifi_status(&self) -> io::Result<String> {
@@ -1282,7 +1313,7 @@ fn bind_to_device(socket: &UdpSocket, interface: &str) -> io::Result<()> {
     }
 }
 
-fn cstring(value: &str) -> io::Result<CString> {
+pub fn cstring(value: &str) -> io::Result<CString> {
     CString::new(value).map_err(|_| io::ErrorKind::InvalidInput.into())
 }
 
@@ -1390,7 +1421,7 @@ fn make_device(path: &str, mode: c_uint, major: u32, minor: u32) -> io::Result<(
 
 /// Writes one record per line to the kernel log. Errors are ignored because
 /// there is nowhere else to report them this early in boot.
-fn log(message: &str) {
+pub fn log(message: &str) {
     if let Ok(mut kmsg) = OpenOptions::new().write(true).open("/dev/kmsg") {
         for line in message.lines() {
             let _ = writeln!(kmsg, "a32-init: {line}");

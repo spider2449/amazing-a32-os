@@ -3,6 +3,8 @@
 //! Running as PID 1 boots the system. Running as any other PID only prints a
 //! read-only device report, so the binary is safe to try under stock Android.
 
+#[cfg(target_os = "linux")]
+mod alpine;
 #[cfg(any(target_os = "linux", test))]
 mod bench;
 mod probe;
@@ -27,6 +29,8 @@ mod shell;
 mod sntp;
 #[cfg(any(target_os = "linux", test))]
 mod thermal;
+#[cfg(any(target_os = "linux", test))]
+mod transfer;
 #[cfg(any(target_os = "linux", test))]
 mod usb;
 #[cfg(any(target_os = "linux", test))]

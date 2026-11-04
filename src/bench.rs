@@ -6,7 +6,6 @@
 
 use std::hint::black_box;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,8 +29,6 @@ const BATTERY_LIMIT_MILLIDEGREES: i64 = 45_000;
 const LOAD_SAMPLE: Duration = Duration::from_secs(5);
 const LOAD_CHUNK: usize = 16 * 1024;
 
-const NET_ACCEPT_WAIT: Duration = Duration::from_secs(60);
-const NET_IDLE_WAIT: Duration = Duration::from_secs(30);
 const NET_BUFFER: usize = 64 * 1024;
 const NET_DEFAULT_SECONDS: u64 = 10;
 
@@ -362,23 +359,7 @@ fn disk(path: &str) -> io::Result<String> {
 /// Serves one connection: the client sends until it closes its side, then this
 /// sends for `seconds`. The port is only open during this call.
 fn net(port: u16, seconds: u64) -> io::Result<String> {
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
-    listener.set_nonblocking(true)?;
-    let start = Instant::now();
-    let mut stream = loop {
-        match listener.accept() {
-            Ok((stream, _)) => break stream,
-            Err(err) if err.kind() != io::ErrorKind::WouldBlock => return Err(err),
-            Err(_) if start.elapsed() > NET_ACCEPT_WAIT => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "no client connected"));
-            }
-            Err(_) => thread::sleep(Duration::from_millis(50)),
-        }
-    };
-    drop(listener);
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(NET_IDLE_WAIT))?;
-    stream.set_write_timeout(Some(NET_IDLE_WAIT))?;
+    let mut stream = crate::transfer::accept_one(port)?;
 
     let mut buffer = vec![0u8; NET_BUFFER];
     let mut received = 0u64;
@@ -527,7 +508,7 @@ mod tests {
 
     #[test]
     fn net_receives_then_sends() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let server = thread::spawn(move || net(port, 0));
