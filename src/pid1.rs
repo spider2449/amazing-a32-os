@@ -10,12 +10,13 @@
 
 use crate::alpine;
 use crate::dhcp::{self, MessageType};
-use crate::display::{status_lines, Canvas};
+use crate::display::Canvas;
 use crate::fb::Framebuffer;
 use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
+use crate::ui::{Request, Snapshot, Ui};
 use crate::usb;
 use crate::wifi;
 use std::ffi::CString;
@@ -29,7 +30,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -53,6 +54,7 @@ extern "C" {
         length: c_uint,
     ) -> c_int;
     fn umount(target: *const c_char) -> c_int;
+    fn statvfs(path: *const c_char, buffer: *mut c_void) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -208,8 +210,18 @@ const FAIL_SAFE_DELAY: Duration = Duration::from_secs(3);
 /// running on battery without USB does not count as a failure.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
 
-/// Whether the backlight is on and the status screen is being drawn.
+/// Whether the backlight is on and the panel is being drawn.
 static SCREEN_ON: AtomicBool = AtomicBool::new(true);
+
+/// What the panel reacts to.
+enum PanelInput {
+    Touch(Option<(i32, i32)>),
+    Networks(Vec<wifi::Network>),
+    Message(String),
+}
+
+/// Where `ui tap` sends its touches, set once the panel is running.
+static PANEL_INPUT: OnceLock<mpsc::Sender<PanelInput>> = OnceLock::new();
 
 /// Set when /data is a mounted filesystem, not a directory in memory.
 static DATA_READY: AtomicBool = AtomicBool::new(false);
@@ -401,56 +413,190 @@ fn run_status_screen() -> io::Result<()> {
     log(&info);
     let _ = fs::write(DISPLAY_INFO, info);
 
-    // `touches` stays alive here, so the receiver below never sees a disconnect
-    // even if the touch thread stops.
-    let (touches, touch_updates) = mpsc::channel();
-    let sender = touches.clone();
+    // `input` stays alive here, so the receiver below never sees a disconnect even if
+    // the touch thread stops.
+    let (input, inputs) = mpsc::channel();
+    let sender = input.clone();
     if let Err(err) = thread::Builder::new().spawn(move || touch_screen(sender)) {
         log(&format!("touch thread failed: {err}"));
     }
+    let _ = PANEL_INPUT.set(input.clone());
 
-    let boot_mode = fs::read_to_string(BOOT_MODE).ok();
+    // Slow work runs apart from the panel, so that the screen keeps responding.
+    let (requests, pending) = mpsc::channel();
+    let replies = input.clone();
+    if let Err(err) = thread::Builder::new().spawn(move || panel_requests(pending, replies)) {
+        log(&format!("panel thread failed: {err}"));
+    }
+
     let mut canvas = Canvas::new(format);
-    let mut touch = None;
+    let mut panel = Ui::default();
     let mut last_use = Instant::now();
     let mut was_on = true;
+    // A touch that wakes the screen must not also press a button under the finger.
+    let mut waking = false;
     loop {
         let on = SCREEN_ON.load(Ordering::Acquire);
         if on && !was_on {
             // Turned on by the power key.
             last_use = Instant::now();
         }
+        if !on && was_on {
+            panel.reset();
+        }
         was_on = on;
         if on && last_use.elapsed() >= SCREEN_TIMEOUT {
             set_screen(false);
+            panel.reset();
             was_on = false;
         } else if on {
-            let uptime = fs::read_to_string("/proc/uptime")?;
-            let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
-            let status = fs::read_to_string(BATTERY_STATUS).ok();
-            let lines = status_lines(
-                &uptime,
-                capacity.as_deref(),
-                status.as_deref(),
-                boot_mode.as_deref(),
-                touch,
-            );
-            canvas.render_status(&lines, touch);
+            panel.render(&mut canvas, &snapshot());
             framebuffer.present(canvas.pixels())?;
         }
 
-        // Redraw when the touch changes, and otherwise once a second. Only the
-        // newest update matters if drawing fell behind.
-        if let Ok(update) = touch_updates.recv_timeout(Duration::from_secs(1)) {
-            touch = update;
-            touch = touch_updates.try_iter().last().unwrap_or(touch);
-            last_use = Instant::now();
-            if !SCREEN_ON.load(Ordering::Acquire) {
-                set_screen(true);
-                was_on = true;
+        // Redraw when something changes, and otherwise once a second.
+        if let Ok(first) = inputs.recv_timeout(Duration::from_secs(1)) {
+            for event in std::iter::once(first).chain(inputs.try_iter()) {
+                match event {
+                    PanelInput::Touch(position) => {
+                        last_use = Instant::now();
+                        if !SCREEN_ON.load(Ordering::Acquire) {
+                            set_screen(true);
+                            was_on = true;
+                            waking = true;
+                        }
+                        if waking {
+                            waking = position.is_some();
+                            continue;
+                        }
+                        if let Some(request) = panel.touch(position) {
+                            let _ = requests.send(request);
+                        }
+                    }
+                    PanelInput::Networks(networks) => panel.set_networks(networks),
+                    PanelInput::Message(message) => {
+                        last_use = Instant::now();
+                        panel.set_message(message);
+                    }
+                }
             }
         }
     }
+}
+
+/// Reads the values the home page shows. None of this starts a process, because it
+/// runs once a second while the screen is on.
+fn snapshot() -> Snapshot {
+    let read = |path: &str| fs::read_to_string(path).unwrap_or_default();
+    let degrees = |zone| {
+        zone_temperature(zone).map_or("?".to_string(), |value| format!("{:.1} C", value as f64 / 1000.0))
+    };
+    let uptime: f64 = read("/proc/uptime")
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.0);
+    let seconds = uptime as u64;
+    let memory = read("/proc/meminfo");
+    let megabytes = |name: &str| {
+        memory
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.split_whitespace().next()?.parse::<u64>().ok())
+            .map_or(0, |kib| kib / 1024)
+    };
+    let connected = read(WIFI_OPERSTATE).trim() == "up";
+    let applied = lease_state().applied;
+    let level = wifi::wireless_level(&read("/proc/net/wireless"), WIFI_INTERFACE);
+    let network = load_saved_network()
+        .map(|saved| wifi::display_ssid(&saved.ssid_bytes()))
+        .unwrap_or_else(|| "not saved".to_string());
+    Snapshot {
+        address: match applied {
+            Some((address, _)) if connected => address.to_string(),
+            _ => "none".to_string(),
+        },
+        network: if connected { network } else { format!("off: {}", read(WIFI_STATE).trim()) },
+        signal: match level {
+            Some(level) if connected => format!("{level} dBm"),
+            _ => "-".to_string(),
+        },
+        ssh: if alpine::ssh_running() { "on, port 22".to_string() } else { "off".to_string() },
+        uptime: format!("{}d {:02}:{:02}:{:02}", seconds / 86400, seconds / 3600 % 24, seconds / 60 % 60, seconds % 60),
+        load: read("/proc/loadavg").split_whitespace().take(3).collect::<Vec<_>>().join(" "),
+        cpu_temperature: degrees(CPU_ZONE),
+        memory: format!("{} of {} MB free", megabytes("MemAvailable:"), megabytes("MemTotal:")),
+        disk: free_disk_text(),
+        battery: format!("{}% {}", read(BATTERY_CAPACITY).trim(), read(BATTERY_STATUS).trim()),
+        battery_temperature: degrees(BATTERY_ZONE),
+    }
+}
+
+/// Describes the free space on /data.
+fn free_disk_text() -> String {
+    // musl's 32-bit `struct statvfs`: `f_bsize` and `f_frsize` are 32 bits, then
+    // `f_blocks`, `f_bfree` and `f_bavail` are 64 bits. This buffer holds all of it.
+    let mut fields = [0u64; 16];
+    let Ok(path) = cstring(DATA_DIR) else {
+        return "?".to_string();
+    };
+    // SAFETY: `path` is a valid string, and `fields` is larger than the structure, and
+    // aligned for it, for the call duration.
+    if !DATA_READY.load(Ordering::Acquire) || unsafe { statvfs(path.as_ptr(), fields.as_mut_ptr().cast()) } != 0 {
+        return "not mounted".to_string();
+    }
+    let block_size = fields[0] >> 32;
+    let mebibytes = |blocks: u64| blocks * block_size / (1024 * 1024);
+    format!("{} of {} MB free", mebibytes(fields[3]), mebibytes(fields[1]))
+}
+
+/// Does the panel's slow work, one request at a time.
+fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<PanelInput>) {
+    let say = |text: String| {
+        let _ = replies.send(PanelInput::Message(text));
+    };
+    for request in requests {
+        match request {
+            Request::Restart => {
+                log("panel: restarting");
+                let err = KernelPlatform.reboot(None);
+                say(format!("Restart failed: {err}"));
+            }
+            Request::PowerOff => {
+                log("panel: powering off");
+                let err = KernelPlatform.power_off();
+                say(format!("Power off failed: {err}"));
+            }
+            Request::Scan => match scan_networks() {
+                Ok(networks) => {
+                    say(format!("{} networks found", networks.len()));
+                    let _ = replies.send(PanelInput::Networks(networks));
+                }
+                Err(err) => say(format!("Scan failed: {err}")),
+            },
+            // The passphrase goes no further than `wifi_join`, which does not log it.
+            Request::Join(credentials) => match KernelPlatform.wifi_join(&credentials) {
+                Ok(_) => {
+                    let address = lease_state().applied.map(|(address, _)| address.to_string());
+                    say(format!("Joined: {}", address.unwrap_or_default()));
+                }
+                Err(err) => say(format!("Not joined: {err}")),
+            },
+            Request::Forget => match KernelPlatform.wifi_forget() {
+                Ok(_) => say("Network forgotten".to_string()),
+                Err(err) => say(format!("Forget failed: {err}")),
+            },
+        }
+    }
+}
+
+fn scan_networks() -> io::Result<Vec<wifi::Network>> {
+    if fs::read_to_string(WIFI_STATE)?.trim() != WIFI_READY {
+        return Err(io::Error::other("Wi-Fi is not ready"));
+    }
+    // A scan can be refused while one is running, and the results are still useful.
+    let _ = wpa_cli(&["scan"]);
+    thread::sleep(WIFI_SCAN_DELAY);
+    Ok(wifi::parse_scan_results(&wpa_cli(&["scan_results"])?))
 }
 
 fn set_screen(on: bool) {
@@ -461,14 +607,59 @@ fn set_screen(on: bool) {
     }
 }
 
-/// Sends touch updates to the status screen. A failure leaves the rest running.
-fn touch_screen(updates: mpsc::Sender<Option<(i32, i32)>>) {
+/// Times the parts of drawing one frame. The status screen may also be drawing if
+/// it is on, so run this with the screen off.
+fn display_bench() -> io::Result<String> {
+    const FRAMES: u32 = 60;
+    let mut framebuffer = Framebuffer::open(FB_DEVICE)?;
+    let mut canvas = Canvas::new(framebuffer.format());
+    let panel = Ui::default();
+    let mut status = snapshot();
+    let (mut render, mut write, mut pan) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let (mut render_max, mut write_max, mut pan_max) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+
+    panel.render(&mut canvas, &status);
+    let first = Instant::now();
+    let first_rows = framebuffer.copy_changes(canvas.pixels())?;
+    let whole_frame = first.elapsed();
+    framebuffer.pan()?;
+
+    let start = Instant::now();
+    for frame in 0..FRAMES {
+        // Changes what a running system changes each second, only faster.
+        status.uptime = format!("0d 00:00:{frame:02}");
+        let t0 = Instant::now();
+        panel.render(&mut canvas, &status);
+        let t1 = Instant::now();
+        framebuffer.copy_changes(canvas.pixels())?;
+        let t2 = Instant::now();
+        framebuffer.pan()?;
+        let t3 = Instant::now();
+        render += t1 - t0;
+        write += t2 - t1;
+        pan += t3 - t2;
+        render_max = render_max.max(t1 - t0);
+        write_max = write_max.max(t2 - t1);
+        pan_max = pan_max.max(t3 - t2);
+    }
+    let total = start.elapsed();
+    let average = |sum: Duration| sum.as_secs_f64() * 1000.0 / f64::from(FRAMES);
+    let longest = |item: Duration| item.as_secs_f64() * 1000.0;
+    Ok(format!(
+        "display.whole_frame rows={first_rows} value={:.1} unit=ms\ndisplay.render value={:.1} max={:.1} unit=ms\ndisplay.write value={:.1} max={:.1} unit=ms\ndisplay.pan value={:.1} max={:.1} unit=ms\ndisplay.rate value={:.1} unit=frames/s\n",
+        longest(whole_frame), average(render), longest(render_max), average(write), longest(write_max), average(pan), longest(pan_max),
+        f64::from(FRAMES) / total.as_secs_f64(),
+    ))
+}
+
+/// Sends touches to the panel. A failure leaves the rest running.
+fn touch_screen(updates: mpsc::Sender<PanelInput>) {
     if let Err(err) = run_touch_screen(&updates) {
         log(&format!("touch stopped: {err}"));
     }
 }
 
-fn run_touch_screen(updates: &mpsc::Sender<Option<(i32, i32)>>) -> io::Result<()> {
+fn run_touch_screen(updates: &mpsc::Sender<PanelInput>) -> io::Result<()> {
     let (major, minor) = wait_for_touch_device()?;
     make_char_device(TOUCH_DEVICE, major, minor, 0o600)?;
     let mut device = File::open(TOUCH_DEVICE)?;
@@ -477,7 +668,7 @@ fn run_touch_screen(updates: &mpsc::Sender<Option<(i32, i32)>>) -> io::Result<()
         let mut raw = [0u8; EVENT_LEN];
         device.read_exact(&mut raw)?;
         if let Some(update) = touch.event(&raw) {
-            updates.send(update).map_err(io::Error::other)?;
+            updates.send(PanelInput::Touch(update)).map_err(io::Error::other)?;
         }
     }
 }
@@ -1183,6 +1374,7 @@ impl Platform for KernelPlatform {
 
     fn bench(&self, arguments: &[&str]) -> io::Result<String> {
         match arguments {
+            ["display"] => display_bench(),
             ["net", port, ..] => {
                 let port = port.parse().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "bad number")
@@ -1191,6 +1383,14 @@ impl Platform for KernelPlatform {
             }
             _ => crate::bench::run(arguments),
         }
+    }
+
+    fn tap(&self, x: i32, y: i32) -> io::Result<()> {
+        let panel = PANEL_INPUT.get().ok_or_else(|| io::Error::other("the panel is not running"))?;
+        for position in [Some((x, y)), None] {
+            panel.send(PanelInput::Touch(position)).map_err(io::Error::other)?;
+        }
+        Ok(())
     }
 
     fn run_alpine(&self, line: &str) -> io::Result<Vec<u8>> {

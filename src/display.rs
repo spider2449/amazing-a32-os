@@ -1,4 +1,4 @@
-//! Pixel formats, drawing and the status screen. Hardware-independent.
+//! Pixel formats and drawing. Hardware-independent.
 
 /// Pixel layout of one color channel, as reported by the framebuffer driver.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -84,12 +84,42 @@ pub const FIX_LEN: usize = 68;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-const BACKGROUND: Rgb = Rgb(12, 18, 28);
-const FOREGROUND: Rgb = Rgb(235, 240, 245);
-const ACCENT: Rgb = Rgb(240, 150, 60);
-const RED: Rgb = Rgb(255, 0, 0);
-const GREEN: Rgb = Rgb(0, 255, 0);
-const BLUE: Rgb = Rgb(0, 0, 255);
+pub const BACKGROUND: Rgb = Rgb(12, 18, 28);
+pub const FOREGROUND: Rgb = Rgb(235, 240, 245);
+pub const ACCENT: Rgb = Rgb(240, 150, 60);
+
+/// An area of the screen, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    pub fn contains(self, x: i32, y: i32) -> bool {
+        let (left, top) = (self.x as i32, self.y as i32);
+        x >= left && y >= top && x < left + self.width as i32 && y < top + self.height as i32
+    }
+
+    pub fn inset(self, by: u32) -> Self {
+        Self {
+            x: self.x + by,
+            y: self.y + by,
+            width: self.width.saturating_sub(by * 2),
+            height: self.height.saturating_sub(by * 2),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+}
 
 /// An in-memory frame. Drawing outside the frame is clipped.
 pub struct Canvas {
@@ -109,21 +139,44 @@ impl Canvas {
         &self.pixels
     }
 
+    pub fn clear(&mut self, color: Rgb) {
+        self.fill_rect(0, 0, self.format.width, self.format.height, color);
+    }
+
+    pub fn fill(&mut self, area: Rect, color: Rgb) {
+        self.fill_rect(area.x, area.y, area.width, area.height, color);
+    }
+
     fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Rgb) {
         let bytes = self.format.bytes_per_pixel() as usize;
         let encoded = self.format.encode(color).to_le_bytes();
         let right = x.saturating_add(width).min(self.format.width) as usize;
         let bottom = y.saturating_add(height).min(self.format.height);
-        for row in y..bottom {
-            let start = (row * self.format.stride) as usize;
-            for column in x as usize..right {
-                let at = start + column * bytes;
-                self.pixels[at..at + bytes].copy_from_slice(&encoded[..bytes]);
-            }
+        let (left, stride) = (x as usize, self.format.stride as usize);
+        if left >= right || y >= bottom {
+            return;
+        }
+        // Fills one row, then copies it to the others.
+        let first = y as usize * stride;
+        let span = first + left * bytes..first + right * bytes;
+        for pixel in self.pixels[span.clone()].chunks_exact_mut(bytes) {
+            pixel.copy_from_slice(&encoded[..bytes]);
+        }
+        for row in y as usize + 1..bottom as usize {
+            let target = row * stride + left * bytes;
+            self.pixels.copy_within(span.clone(), target);
         }
     }
 
-    fn draw_text(&mut self, x: u32, y: u32, scale: u32, text: &str, color: Rgb) {
+    /// Draws text in the middle of an area.
+    pub fn draw_text_centered(&mut self, area: Rect, scale: u32, text: &str, color: Rgb) {
+        let width = text.chars().count() as u32 * GLYPH_ADVANCE * scale;
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(7 * scale) / 2;
+        self.draw_text(x, y, scale, text, color);
+    }
+
+    pub fn draw_text(&mut self, x: u32, y: u32, scale: u32, text: &str, color: Rgb) {
         for (index, character) in text.chars().enumerate() {
             let left = x + index as u32 * (GLYPH_ADVANCE * scale);
             for (column, bits) in glyph(character).iter().enumerate() {
@@ -137,127 +190,124 @@ impl Canvas {
         }
     }
 
-    /// Redraws the whole status screen.
-    pub fn render_status(&mut self, lines: &[String], touch: Option<(i32, i32)>) {
-        let (width, height) = (self.format.width, self.format.height);
-        self.fill_rect(0, 0, width, height, BACKGROUND);
-
-        self.draw_text(32, 72, 6, "AMAZING A32", ACCENT);
-        self.draw_text(32, 136, 4, "RUST SYSTEM", FOREGROUND);
-
-        let bar = width / 3;
-        self.fill_rect(0, 220, bar, 90, RED);
-        self.fill_rect(bar, 220, bar, 90, GREEN);
-        self.fill_rect(bar * 2, 220, width - bar * 2, 90, BLUE);
-        self.draw_text(bar / 2 - 12, 250, 4, "R", BACKGROUND);
-        self.draw_text(bar + bar / 2 - 12, 250, 4, "G", BACKGROUND);
-        self.draw_text(bar * 2 + bar / 2 - 12, 250, 4, "B", FOREGROUND);
-
-        for (index, line) in lines.iter().enumerate() {
-            self.draw_text(32, 360 + index as u32 * 48, 3, line, FOREGROUND);
-        }
-
-        if let Some((x, y)) = touch {
-            let (x, y) = (x.max(0) as u32, y.max(0) as u32);
-            let (left, top) = (x.saturating_sub(MARKER_REACH), y.saturating_sub(MARKER_REACH));
-            let length = MARKER_REACH * 2 + MARKER_WIDTH;
-            self.fill_rect(left, y, length, MARKER_WIDTH, ACCENT);
-            self.fill_rect(x, top, MARKER_WIDTH, length, ACCENT);
-        }
-    }
-}
-
-// The size of the cross drawn where the screen is touched.
-const MARKER_REACH: u32 = 40;
-const MARKER_WIDTH: u32 = 4;
-
-/// Formats the live status lines from raw kernel values.
-pub fn status_lines(
-    uptime: &str,
-    capacity: Option<&str>,
-    status: Option<&str>,
-    boot_mode: Option<&str>,
-    touch: Option<(i32, i32)>,
-) -> Vec<String> {
-    let seconds = uptime
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0) as u64;
-    vec![
-        format!(
-            "UP {:02}:{:02}:{:02}",
-            seconds / 3600,
-            seconds / 60 % 60,
-            seconds % 60
-        ),
-        format!(
-            "BAT {}% {}",
-            capacity.map_or("?", str::trim),
-            status.map_or("UNKNOWN", str::trim)
-        ),
-        format!("MODE {}", boot_mode.map_or("?", str::trim)),
-        touch.map_or("TOUCH -".to_string(), |(x, y)| format!("TOUCH {x} {y}")),
-    ]
 }
 
 /// Horizontal space per character: five glyph columns plus one blank column.
 const GLYPH_ADVANCE: u32 = 6;
 
-/// Returns five columns of a 5x7 glyph, with the top row in bit 0. Lowercase
-/// letters use the uppercase shapes, and unknown characters render as blank.
+/// Returns five columns of a 5x7 glyph, with the top row in bit 0. It covers printable
+/// ASCII, which is what a passphrase can hold. Other characters render as a box.
 fn glyph(character: char) -> [u8; 5] {
-    match character.to_ascii_uppercase() {
-        '0' => [0x3E, 0x51, 0x49, 0x45, 0x3E],
-        '1' => [0x00, 0x42, 0x7F, 0x40, 0x00],
-        '2' => [0x42, 0x61, 0x51, 0x49, 0x46],
-        '3' => [0x21, 0x41, 0x45, 0x4B, 0x31],
-        '4' => [0x18, 0x14, 0x12, 0x7F, 0x10],
-        '5' => [0x27, 0x45, 0x45, 0x45, 0x39],
-        '6' => [0x3C, 0x4A, 0x49, 0x49, 0x30],
-        '7' => [0x01, 0x71, 0x09, 0x05, 0x03],
-        '8' => [0x36, 0x49, 0x49, 0x49, 0x36],
-        '9' => [0x06, 0x49, 0x49, 0x29, 0x1E],
-        'A' => [0x7E, 0x11, 0x11, 0x11, 0x7E],
-        'B' => [0x7F, 0x49, 0x49, 0x49, 0x36],
-        'C' => [0x3E, 0x41, 0x41, 0x41, 0x22],
-        'D' => [0x7F, 0x41, 0x41, 0x22, 0x1C],
-        'E' => [0x7F, 0x49, 0x49, 0x49, 0x41],
-        'F' => [0x7F, 0x09, 0x09, 0x09, 0x01],
-        'G' => [0x3E, 0x41, 0x49, 0x49, 0x7A],
-        'H' => [0x7F, 0x08, 0x08, 0x08, 0x7F],
-        'I' => [0x00, 0x41, 0x7F, 0x41, 0x00],
-        'J' => [0x20, 0x40, 0x41, 0x3F, 0x01],
-        'K' => [0x7F, 0x08, 0x14, 0x22, 0x41],
-        'L' => [0x7F, 0x40, 0x40, 0x40, 0x40],
-        'M' => [0x7F, 0x02, 0x0C, 0x02, 0x7F],
-        'N' => [0x7F, 0x04, 0x08, 0x10, 0x7F],
-        'O' => [0x3E, 0x41, 0x41, 0x41, 0x3E],
-        'P' => [0x7F, 0x09, 0x09, 0x09, 0x06],
-        'Q' => [0x3E, 0x41, 0x51, 0x21, 0x5E],
-        'R' => [0x7F, 0x09, 0x19, 0x29, 0x46],
-        'S' => [0x46, 0x49, 0x49, 0x49, 0x31],
-        'T' => [0x01, 0x01, 0x7F, 0x01, 0x01],
-        'U' => [0x3F, 0x40, 0x40, 0x40, 0x3F],
-        'V' => [0x1F, 0x20, 0x40, 0x20, 0x1F],
-        'W' => [0x3F, 0x40, 0x38, 0x40, 0x3F],
-        'X' => [0x63, 0x14, 0x08, 0x14, 0x63],
-        'Y' => [0x07, 0x08, 0x70, 0x08, 0x07],
-        'Z' => [0x61, 0x51, 0x49, 0x45, 0x43],
-        '.' => [0x00, 0x60, 0x60, 0x00, 0x00],
-        ':' => [0x00, 0x36, 0x36, 0x00, 0x00],
-        '-' => [0x08, 0x08, 0x08, 0x08, 0x08],
-        '%' => [0x23, 0x13, 0x08, 0x64, 0x62],
-        '?' => [0x02, 0x01, 0x51, 0x09, 0x06],
-        _ => [0; 5],
+    let code = character as u32;
+    if !(0x20..=0x7e).contains(&code) {
+        return [0x7F, 0x41, 0x41, 0x41, 0x7F];
     }
+    FONT[(code - 0x20) as usize]
 }
 
+const FONT: [[u8; 5]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00], // space
+    [0x00, 0x00, 0x5F, 0x00, 0x00], // !
+    [0x00, 0x07, 0x00, 0x07, 0x00], // "
+    [0x14, 0x7F, 0x14, 0x7F, 0x14], // #
+    [0x24, 0x2A, 0x7F, 0x2A, 0x12], // $
+    [0x23, 0x13, 0x08, 0x64, 0x62], // %
+    [0x36, 0x49, 0x56, 0x20, 0x50], // &
+    [0x00, 0x08, 0x07, 0x03, 0x00], // '
+    [0x00, 0x1C, 0x22, 0x41, 0x00], // (
+    [0x00, 0x41, 0x22, 0x1C, 0x00], // )
+    [0x2A, 0x1C, 0x7F, 0x1C, 0x2A], // *
+    [0x08, 0x08, 0x3E, 0x08, 0x08], // +
+    [0x00, 0x50, 0x30, 0x00, 0x00], // ,
+    [0x08, 0x08, 0x08, 0x08, 0x08], // -
+    [0x00, 0x60, 0x60, 0x00, 0x00], // .
+    [0x20, 0x10, 0x08, 0x04, 0x02], // /
+    [0x3E, 0x51, 0x49, 0x45, 0x3E], // 0
+    [0x00, 0x42, 0x7F, 0x40, 0x00], // 1
+    [0x42, 0x61, 0x51, 0x49, 0x46], // 2
+    [0x21, 0x41, 0x45, 0x4B, 0x31], // 3
+    [0x18, 0x14, 0x12, 0x7F, 0x10], // 4
+    [0x27, 0x45, 0x45, 0x45, 0x39], // 5
+    [0x3C, 0x4A, 0x49, 0x49, 0x30], // 6
+    [0x01, 0x71, 0x09, 0x05, 0x03], // 7
+    [0x36, 0x49, 0x49, 0x49, 0x36], // 8
+    [0x06, 0x49, 0x49, 0x29, 0x1E], // 9
+    [0x00, 0x36, 0x36, 0x00, 0x00], // :
+    [0x00, 0x56, 0x36, 0x00, 0x00], // ;
+    [0x08, 0x14, 0x22, 0x41, 0x00], // <
+    [0x14, 0x14, 0x14, 0x14, 0x14], // =
+    [0x00, 0x41, 0x22, 0x14, 0x08], // >
+    [0x02, 0x01, 0x51, 0x09, 0x06], // ?
+    [0x3E, 0x41, 0x5D, 0x59, 0x4E], // @
+    [0x7E, 0x11, 0x11, 0x11, 0x7E], // A
+    [0x7F, 0x49, 0x49, 0x49, 0x36], // B
+    [0x3E, 0x41, 0x41, 0x41, 0x22], // C
+    [0x7F, 0x41, 0x41, 0x22, 0x1C], // D
+    [0x7F, 0x49, 0x49, 0x49, 0x41], // E
+    [0x7F, 0x09, 0x09, 0x09, 0x01], // F
+    [0x3E, 0x41, 0x49, 0x49, 0x7A], // G
+    [0x7F, 0x08, 0x08, 0x08, 0x7F], // H
+    [0x00, 0x41, 0x7F, 0x41, 0x00], // I
+    [0x20, 0x40, 0x41, 0x3F, 0x01], // J
+    [0x7F, 0x08, 0x14, 0x22, 0x41], // K
+    [0x7F, 0x40, 0x40, 0x40, 0x40], // L
+    [0x7F, 0x02, 0x0C, 0x02, 0x7F], // M
+    [0x7F, 0x04, 0x08, 0x10, 0x7F], // N
+    [0x3E, 0x41, 0x41, 0x41, 0x3E], // O
+    [0x7F, 0x09, 0x09, 0x09, 0x06], // P
+    [0x3E, 0x41, 0x51, 0x21, 0x5E], // Q
+    [0x7F, 0x09, 0x19, 0x29, 0x46], // R
+    [0x46, 0x49, 0x49, 0x49, 0x31], // S
+    [0x01, 0x01, 0x7F, 0x01, 0x01], // T
+    [0x3F, 0x40, 0x40, 0x40, 0x3F], // U
+    [0x1F, 0x20, 0x40, 0x20, 0x1F], // V
+    [0x3F, 0x40, 0x38, 0x40, 0x3F], // W
+    [0x63, 0x14, 0x08, 0x14, 0x63], // X
+    [0x07, 0x08, 0x70, 0x08, 0x07], // Y
+    [0x61, 0x51, 0x49, 0x45, 0x43], // Z
+    [0x00, 0x7F, 0x41, 0x41, 0x00], // [
+    [0x02, 0x04, 0x08, 0x10, 0x20], // backslash
+    [0x00, 0x41, 0x41, 0x7F, 0x00], // ]
+    [0x04, 0x02, 0x01, 0x02, 0x04], // ^
+    [0x40, 0x40, 0x40, 0x40, 0x40], // _
+    [0x00, 0x01, 0x02, 0x04, 0x00], // `
+    [0x20, 0x54, 0x54, 0x54, 0x78], // a
+    [0x7F, 0x48, 0x44, 0x44, 0x38], // b
+    [0x38, 0x44, 0x44, 0x44, 0x20], // c
+    [0x38, 0x44, 0x44, 0x48, 0x7F], // d
+    [0x38, 0x54, 0x54, 0x54, 0x18], // e
+    [0x08, 0x7E, 0x09, 0x01, 0x02], // f
+    [0x0C, 0x52, 0x52, 0x52, 0x3E], // g
+    [0x7F, 0x08, 0x04, 0x04, 0x78], // h
+    [0x00, 0x44, 0x7D, 0x40, 0x00], // i
+    [0x20, 0x40, 0x44, 0x3D, 0x00], // j
+    [0x7F, 0x10, 0x28, 0x44, 0x00], // k
+    [0x00, 0x41, 0x7F, 0x40, 0x00], // l
+    [0x7C, 0x04, 0x18, 0x04, 0x78], // m
+    [0x7C, 0x08, 0x04, 0x04, 0x78], // n
+    [0x38, 0x44, 0x44, 0x44, 0x38], // o
+    [0x7C, 0x14, 0x14, 0x14, 0x08], // p
+    [0x08, 0x14, 0x14, 0x18, 0x7C], // q
+    [0x7C, 0x08, 0x04, 0x04, 0x08], // r
+    [0x48, 0x54, 0x54, 0x54, 0x20], // s
+    [0x04, 0x3F, 0x44, 0x40, 0x20], // t
+    [0x3C, 0x40, 0x40, 0x20, 0x7C], // u
+    [0x1C, 0x20, 0x40, 0x20, 0x1C], // v
+    [0x3C, 0x40, 0x30, 0x40, 0x3C], // w
+    [0x44, 0x28, 0x10, 0x28, 0x44], // x
+    [0x0C, 0x50, 0x50, 0x50, 0x3C], // y
+    [0x44, 0x64, 0x54, 0x4C, 0x44], // z
+    [0x00, 0x08, 0x36, 0x41, 0x00], // {
+    [0x00, 0x00, 0x7F, 0x00, 0x00], // |
+    [0x00, 0x41, 0x36, 0x08, 0x00], // }
+    [0x08, 0x04, 0x08, 0x10, 0x08], // ~
+];
+
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
-    fn rgba8888() -> Format {
+    pub fn rgba8888() -> Format {
         Format {
             width: 480,
             height: 854,
@@ -313,58 +363,30 @@ mod tests {
     }
 
     #[test]
-    fn status_screen_shows_all_three_color_bars() {
-        let mut canvas = Canvas::new(rgba8888());
-        let lines = status_lines("5.0 1.0", Some("50"), Some("Charging"), Some("0"), None);
-        canvas.render_status(&lines, None);
-        assert_eq!(pixel(&canvas, 10, 230), [255, 0, 0, 255]);
-        assert_eq!(pixel(&canvas, 170, 230), [0, 255, 0, 255]);
-        assert_eq!(pixel(&canvas, 470, 230), [0, 0, 255, 255]);
-        assert_eq!(pixel(&canvas, 0, 0), [12, 18, 28, 255]);
-    }
-
-    #[test]
     fn long_text_is_clipped_without_panicking() {
         let mut canvas = Canvas::new(rgba8888());
         canvas.draw_text(470, 850, 8, "WIDE TEXT PAST THE EDGE", FOREGROUND);
     }
 
     #[test]
-    fn glyphs_cover_status_text() {
-        assert_ne!(glyph('a'), [0; 5]);
-        assert_eq!(glyph('a'), glyph('A'));
+    fn the_font_covers_printable_ascii() {
         assert_eq!(glyph(' '), [0; 5]);
-    }
-
-    #[test]
-    fn formats_status_lines() {
-        assert_eq!(
-            status_lines(
-                "3725.40 99.0\n",
-                Some("62\n"),
-                Some("Charging\n"),
-                Some("9\n"),
-                Some((120, 640))
-            ),
-            vec!["UP 01:02:05", "BAT 62% Charging", "MODE 9", "TOUCH 120 640"]
-        );
-        assert_eq!(
-            status_lines("garbage", None, None, None, None),
-            vec!["UP 00:00:00", "BAT ?% UNKNOWN", "MODE ?", "TOUCH -"]
-        );
-    }
-
-    #[test]
-    fn touch_marker_is_drawn_and_clipped_at_the_edges() {
-        let mut canvas = Canvas::new(rgba8888());
-        canvas.render_status(&[], Some((240, 700)));
-        assert_eq!(pixel(&canvas, 220, 701), [ACCENT.0, ACCENT.1, ACCENT.2, 255]);
-        assert_eq!(pixel(&canvas, 241, 680), [ACCENT.0, ACCENT.1, ACCENT.2, 255]);
-        assert_eq!(pixel(&canvas, 300, 701), [12, 18, 28, 255]);
-
-        for corner in [(-5, -5), (479, 853), (5000, 5000)] {
-            canvas.render_status(&[], Some(corner));
+        for code in 0x21u8..=0x7e {
+            assert_ne!(glyph(char::from(code)), [0; 5], "{}", char::from(code));
+            // Bit 7 would fall outside the 7 rows that are drawn.
+            assert!(glyph(char::from(code)).iter().all(|column| column & 0x80 == 0));
         }
+        assert_ne!(glyph('a'), glyph('A'));
+        assert_ne!(glyph('\u{4e2d}'), [0; 5]);
+    }
+
+    #[test]
+    fn rect_finds_points_and_overlaps() {
+        let area = Rect { x: 10, y: 20, width: 30, height: 40 };
+        assert!(area.contains(10, 20) && area.contains(39, 59));
+        assert!(!area.contains(40, 20) && !area.contains(10, 60) && !area.contains(-1, -1));
+        assert!(area.overlaps(Rect { x: 39, y: 59, width: 5, height: 5 }));
+        assert!(!area.overlaps(Rect { x: 40, y: 20, width: 5, height: 5 }));
     }
 
     #[test]

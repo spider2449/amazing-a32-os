@@ -29,6 +29,8 @@ const HELP: &str = "commands:
   tcp HOST:PORT                try a TCP connection
   bench cpu|mem|disk PATH      measure performance
   bench write NEW_FILE         measure writes to a new file, then remove it
+  bench display                measure drawing, with the screen off
+  ui tap X Y                   act as if the screen were touched there
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
   poweroff[SECONDS]           turn the phone off, optionally after a delay
@@ -51,6 +53,8 @@ pub trait Platform {
     fn dhcp(&self, interface: &str) -> io::Result<String>;
     /// Runs a performance measurement and returns its results.
     fn bench(&self, arguments: &[&str]) -> io::Result<String>;
+    /// Acts as if the screen were touched at this position, then released.
+    fn tap(&self, x: i32, y: i32) -> io::Result<()>;
     /// Describes the Wi-Fi state.
     fn wifi_status(&self) -> io::Result<String>;
     /// Joins a network, gets an address and describes the result.
@@ -120,6 +124,10 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
                 .and_then(|text| writeln!(out, "{text}"))
         }
         ["tcp", address] => try_tcp(address, out),
+        ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
+            (Ok(x), Ok(y)) => platform.tap(x, y),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+        },
         ["bench", arguments @ ..] => {
             platform.bench(arguments).and_then(|text| out.write_all(text.as_bytes()))
         }
@@ -198,6 +206,11 @@ mod tests {
         fn bench(&self, arguments: &[&str]) -> io::Result<String> {
             Ok(format!("bench {arguments:?}
 "))
+        }
+
+        fn tap(&self, x: i32, y: i32) -> io::Result<()> {
+            assert_eq!((x, y), (10, 20));
+            Ok(())
         }
 
         fn run_alpine(&self, line: &str) -> io::Result<Vec<u8>> {
@@ -285,6 +298,13 @@ mod tests {
     fn alpine_passes_the_rest_of_the_line_unchanged() {
         assert!(session("alpine echo  'a b'\n").0.contains("alpine ran [echo  'a b']"));
         assert!(session("alpine\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn tap_needs_a_position() {
+        assert_eq!(session("ui tap 10 20\n").0, "a32> a32> ");
+        assert!(session("ui tap 10\n").0.contains("unknown command"));
+        assert!(session("ui tap x 20\n").0.contains("error: bad number"));
     }
 
     #[test]

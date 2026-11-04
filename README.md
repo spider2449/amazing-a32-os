@@ -227,8 +227,8 @@ No ARM GCC toolchain is needed: the build uses Rust's bundled LLD and musl.
 
 - Run as PID 1: mounts `/dev`, `/proc`, `/sys` and `/run`, creates device nodes,
   logs to the kernel log, starts a USB serial debug shell (VID `0e8d`, PID
-  `2007`), draws a status screen with uptime and battery on `fb0` (RGBA8888),
-  then reaps child processes forever.
+  `2007`), draws the touch panel on `fb0` (RGBA8888), runs the services in the
+  sections below, then reaps child processes forever.
 - Run as any other PID: prints a read-only device report and exits.
 
 Both paths have run on the phone. The PID 1 path ran from a RAM boot for 64
@@ -354,18 +354,42 @@ Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
 A short press turns the backlight off or on. Holding the key for 3 seconds powers
 the phone off. Without USB it stays off until the key starts it again.
 
-## Touch screen
+## Touch panel
 
-The status screen draws a cross at the touched position and shows its coordinates.
-The top left corner read `4,4` and the bottom right read `476,850`, so the
-coordinates match the 480x854 display without calibration.
+The screen is a panel, drawn by the init with no other graphics software. The home page
+shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
+power off the phone, and scan for and join a WPA2 network with an on-screen keyboard.
+Restarting, powering off and forgetting the network each ask first, with the second button
+in a different place, so a double tap cannot confirm by accident.
 
-Open problems:
+A button acts when the finger lifts over it, and only if the finger came down on it. The
+screen turns off 60 seconds after the last use and drops anything typed. A touch or the
+power key turns it on, and that first touch presses nothing. Holding the power key for 3
+seconds powers off, as before. The RESTART and POWER OFF buttons were each tested once with
+`ui tap`, with USB attached: the phone left and returned, and after a power off it rejoined
+the network.
 
-- The cross lags behind the finger. The cause has not been measured.
-- `/dev/touch` was missing on one boot. Six later boots were fine, and each found
-  the device at once, so the retry added since then is not proven to be the fix.
-  `/run/init.log` now keeps the reason if it happens again.
+The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
+enterprise networks are not listed, because this system cannot join them. Text is ASCII, so
+other characters in an SSID show as `?`, but such a network can still be joined.
+
+Touch coordinates match the 480x854 display without calibration: the top left corner read
+`4,4` and the bottom right `476,850`.
+
+To check the panel from the computer, `ui tap X Y` on the console acts like a finger, and
+this saves the screen. A saved screen can show a passphrase, so delete it after use:
+
+```powershell
+scripts/screenshot.ps1 -OutFile target/screen.png
+```
+
+Drawing used to be slow enough to see: 5.3 frames a second. `bench display` showed the time
+was in writing the frame with `write`, at 153 ms of about 188 ms. Mapping the framebuffer and
+copying only the rows that changed gave about 55 frames a second, with the panel drawing as
+fast as 2.8 ms. Other old devices may have the same problem.
+
+`/dev/touch` was missing on one early boot. Later boots found it each time, and
+`/run/init.log` keeps the reason if it happens again.
 
 ## Wi-Fi
 
@@ -496,7 +520,7 @@ The `sh LINE` console command runs a line with the stock shell.
 With USB attached, a powered-off phone starts by itself in charger mode. The USB
 console does not appear in this mode, and unplugging USB turns the phone off. The
 init therefore restarts into normal mode when `boot_mode` is `8`. It stays in place
-for `9`, the low battery charger mode. The status screen shows the mode.
+for `9`, the low battery charger mode.
 
 This was tested with `poweroff` while USB was attached. The phone started twice,
 then ended in mode `0` with the console ready about 60 seconds later. Each start

@@ -44,6 +44,11 @@ pub fn parse_join(text: &str) -> Result<Credentials, &'static str> {
     let [ssid, passphrase] = words.as_slice() else {
         return Err("usage: wifi join SSID PASSPHRASE");
     };
+    credentials(ssid.as_bytes(), passphrase)
+}
+
+/// Checks network details. An SSID is bytes, which need not be valid text.
+pub fn credentials(ssid: &[u8], passphrase: &str) -> Result<Credentials, &'static str> {
     if ssid.is_empty() || ssid.len() > SSID_MAX_BYTES {
         return Err("the SSID must be 1 to 32 bytes");
     }
@@ -53,9 +58,101 @@ pub fn parse_join(text: &str) -> Result<Credentials, &'static str> {
         return Err("the passphrase must be 8 to 63 printable ASCII characters");
     }
     Ok(Credentials {
-        ssid: ssid.bytes().map(|byte| format!("{byte:02x}")).collect(),
+        ssid: ssid.iter().map(|byte| format!("{byte:02x}")).collect(),
         psk: format!("\"{passphrase}\""),
     })
+}
+
+/// A network that was found by a scan and that `wifi join` can use.
+#[derive(Debug, PartialEq)]
+pub struct Network {
+    pub ssid: Vec<u8>,
+    pub signal: i32,
+}
+
+impl Network {
+    pub fn label(&self) -> String {
+        format!("{:>4} {}", self.signal, display_ssid(&self.ssid))
+    }
+}
+
+/// An SSID as printable ASCII, which is all the panel's font holds.
+pub fn display_ssid(ssid: &[u8]) -> String {
+    let text = String::from_utf8_lossy(ssid);
+    text.chars().map(|character| if character.is_ascii_graphic() || character == ' ' { character } else { '?' }).collect()
+}
+
+/// Parses `wpa_cli scan_results`. It keeps WPA2 personal networks, which are the only
+/// ones this system can join, once each, with the strongest first.
+pub fn parse_scan_results(text: &str) -> Vec<Network> {
+    let mut networks: Vec<Network> = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [_, _, signal, flags, ssid] = fields.as_slice() else {
+            continue;
+        };
+        let (Ok(signal), ssid) = (signal.parse::<i32>(), decode_printf(ssid)) else {
+            continue;
+        };
+        if !flags.contains("WPA2-PSK") || ssid.is_empty() {
+            continue;
+        }
+        match networks.iter_mut().find(|network| network.ssid == ssid) {
+            Some(known) => known.signal = known.signal.max(signal),
+            None => networks.push(Network { ssid, signal }),
+        }
+    }
+    networks.sort_by_key(|network| std::cmp::Reverse(network.signal));
+    networks
+}
+
+/// Reverses the escaping `wpa_cli` uses for SSIDs: `\\`, `\"`, `\e`, `\n`, `\r`, `\t`,
+/// octal and `\xNN`.
+fn decode_printf(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        if byte != b'\\' || index == bytes.len() {
+            decoded.push(byte);
+            continue;
+        }
+        let escape = bytes[index];
+        index += 1;
+        match escape {
+            b'n' => decoded.push(b'\n'),
+            b'r' => decoded.push(b'\r'),
+            b't' => decoded.push(b'\t'),
+            b'e' => decoded.push(0x1b),
+            b'x' => {
+                let end = (index + 2).min(bytes.len());
+                let digits = std::str::from_utf8(&bytes[index..end]).unwrap_or_default();
+                let digits = digits.split(|c: char| !c.is_ascii_hexdigit()).next().unwrap_or_default();
+                decoded.push(u8::from_str_radix(digits, 16).unwrap_or(0));
+                index += digits.len();
+            }
+            b'0'..=b'7' => {
+                let mut value = u32::from(escape - b'0');
+                let mut digits = 1;
+                while digits < 3 && index < bytes.len() && (b'0'..=b'7').contains(&bytes[index]) {
+                    value = value * 8 + u32::from(bytes[index] - b'0');
+                    index += 1;
+                    digits += 1;
+                }
+                decoded.push(value as u8);
+            }
+            other => decoded.push(other),
+        }
+    }
+    decoded
+}
+
+/// Reads the level, in dBm, from `/proc/net/wireless`.
+pub fn wireless_level(text: &str, interface: &str) -> Option<i32> {
+    let line = text.lines().find(|line| line.trim_start().starts_with(&format!("{interface}:")))?;
+    line.split_whitespace().nth(3)?.trim_end_matches('.').parse().ok()
 }
 
 /// Splits on whitespace. A word that starts with `"` runs to the next `"` that
@@ -83,6 +180,15 @@ impl Credentials {
     /// The form kept on storage, which `from_saved` reads back.
     pub fn to_saved(&self) -> String {
         format!("{}\n{}\n", self.ssid, self.psk)
+    }
+
+    /// The SSID as bytes.
+    pub fn ssid_bytes(&self) -> Vec<u8> {
+        self.ssid
+            .as_bytes()
+            .chunks(2)
+            .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+            .collect()
     }
 
     pub fn from_saved(text: &str) -> Option<Self> {
@@ -183,6 +289,56 @@ mod tests {
         assert!(Credentials::from_saved("6e657\n\"password1\"\n").is_none());
         assert!(Credentials::from_saved("zz\n\"password1\"\n").is_none());
         assert!(Credentials::from_saved("6e6574\n\"password1\"").is_none());
+    }
+
+    #[test]
+    fn scan_results_keep_wpa2_networks_strongest_first() {
+        let text = "bssid / frequency / signal level / flags / ssid\n\
+            aa:aa\t2412\t-70\t[WPA2-PSK-CCMP][ESS]\tweak\n\
+            bb:bb\t2437\t-40\t[WPA-PSK-TKIP+CCMP][WPA2-PSK-TKIP+CCMP][ESS]\tstrong\n\
+            cc:cc\t2462\t-30\t[ESS]\topen\n\
+            dd:dd\t2412\t-20\t[WPA2-EAP-CCMP][ESS]\tenterprise\n\
+            ee:ee\t2412\t-50\t[WPA2-PSK-CCMP][ESS]\tweak\n\
+            ff:ff\t2412\t-10\t[WPA2-PSK-CCMP][ESS]\t\n";
+        let networks = parse_scan_results(text);
+        assert_eq!(
+            networks,
+            vec![
+                Network { ssid: b"strong".to_vec(), signal: -40 },
+                Network { ssid: b"weak".to_vec(), signal: -50 },
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_escaped_ssids() {
+        assert_eq!(decode_printf(r#"a\\b\"c"#), b"a\\b\"c");
+        assert_eq!(decode_printf(r"\xe4\xb8\xad"), "\u{4e2d}".as_bytes());
+        assert_eq!(decode_printf(r"\t\n\r\e"), [9, 10, 13, 27]);
+        assert_eq!(decode_printf(r"\101x"), b"Ax");
+        assert_eq!(decode_printf("end\\"), b"end\\");
+        assert_eq!(decode_printf(r"\x"), [0]);
+    }
+
+    #[test]
+    fn displays_ssids_as_ascii() {
+        assert_eq!(display_ssid(b"My Net"), "My Net");
+        assert_eq!(display_ssid("\u{4e2d}a".as_bytes()), "?a");
+        assert_eq!(display_ssid(&[0xff, b'a']), "?a");
+    }
+
+    #[test]
+    fn saved_ssid_reads_back_as_bytes() {
+        let credentials = credentials(&[0xe4, 0x20], "password1").unwrap();
+        assert_eq!(credentials.ssid_bytes(), [0xe4, 0x20]);
+    }
+
+    #[test]
+    fn reads_the_wireless_level() {
+        let text = "Inter-| sta-|   Quality\n face | tus | link level noise\n wlan0: 0000    0.  -35.  -256.       0\n";
+        assert_eq!(wireless_level(text, "wlan0"), Some(-35));
+        assert_eq!(wireless_level(text, "wlan1"), None);
+        assert_eq!(wireless_level("", "wlan0"), None);
     }
 
     #[test]

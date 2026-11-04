@@ -40,6 +40,8 @@ const SSH_SOURCES: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
 
 /// Set when all firewall rules are in place. SSH does not start without them.
 static FIREWALL_READY: AtomicBool = AtomicBool::new(false);
+/// Whether `sshd` is running.
+static SSH_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Whether the mounts for the chroot are done.
 static PREPARED: Mutex<bool> = Mutex::new(false);
 
@@ -181,6 +183,10 @@ pub fn run_line(line: &str) -> io::Result<Vec<u8>> {
     Ok(text)
 }
 
+pub fn ssh_running() -> bool {
+    SSH_RUNNING.load(Ordering::Acquire)
+}
+
 /// Keeps `sshd` running once Alpine has it, so that installing needs no restart.
 pub fn ssh_service() {
     let mut reported = false;
@@ -192,11 +198,13 @@ pub fn ssh_service() {
             match start_sshd() {
                 Ok(process) => {
                     log(&format!("ssh: sshd started as {process}"));
+                    SSH_RUNNING.store(true, Ordering::Release);
                     // `reap_forever` collects it, so its entry in /proc shows it ended.
                     let entry = format!("/proc/{process}");
                     while Path::new(&entry).exists() {
                         thread::sleep(SSHD_CHECK);
                     }
+                    SSH_RUNNING.store(false, Ordering::Release);
                     log(&format!("ssh: sshd ended, see {SSHD_LOG}"));
                     reported = false;
                 }
