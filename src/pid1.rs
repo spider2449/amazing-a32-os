@@ -154,7 +154,12 @@ const WIFI_CALIBRATION_SOURCE: &str = "/run/nvdata/APCFG/APRDEB";
 const WIFI_CALIBRATION_TARGET: &str = "/data/nvram/APCFG/APRDEB";
 const WIFI_CALIBRATION_FILES: &[&str] = &["WIFI", "WIFI_CUSTOM"];
 const RESOLV_CONF: &str = "/run/resolv.conf";
+// Without this the governor counts time waiting for the eMMC as idle and slows the CPU,
+// which halved random reads and writes. It was measured to cost no idle temperature.
+const CPU_IO_IS_BUSY: &str = "/sys/devices/system/cpu/cpufreq/interactive/io_is_busy";
 const NETWORK_CHECK: Duration = Duration::from_secs(5);
+// Reads `up` only when `wpa_supplicant` has finished connecting, and costs no process.
+const WIFI_OPERSTATE: &str = "/sys/class/net/wlan0/operstate";
 const LEASE_RETRY: Duration = Duration::from_secs(30);
 // Names first, and an address as a fallback if the DNS server fails.
 const TIME_SERVERS: &[&str] = &["time.google.com:123", "pool.ntp.org:123", "216.239.35.0:123"];
@@ -203,6 +208,9 @@ const FAIL_SAFE_DELAY: Duration = Duration::from_secs(3);
 /// running on battery without USB does not count as a failure.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
 
+/// Whether the backlight is on and the status screen is being drawn.
+static SCREEN_ON: AtomicBool = AtomicBool::new(true);
+
 /// Set when /data is a mounted filesystem, not a directory in memory.
 static DATA_READY: AtomicBool = AtomicBool::new(false);
 
@@ -234,6 +242,9 @@ const DISPLAY_INFO: &str = "/run/display-info";
 const BACKLIGHT: &str = "/sys/class/leds/lcd-backlight/brightness";
 // A low level, because the screen stays on for the whole session.
 const BACKLIGHT_LEVEL: &str = "64";
+// Drawing the whole screen each second took much of the idle CPU time, so the screen
+// turns off when nobody is using it.
+const SCREEN_TIMEOUT: Duration = Duration::from_secs(60);
 const BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
 const BATTERY_STATUS: &str = "/sys/class/power_supply/battery/status";
 
@@ -401,26 +412,52 @@ fn run_status_screen() -> io::Result<()> {
     let boot_mode = fs::read_to_string(BOOT_MODE).ok();
     let mut canvas = Canvas::new(format);
     let mut touch = None;
+    let mut last_use = Instant::now();
+    let mut was_on = true;
     loop {
-        let uptime = fs::read_to_string("/proc/uptime")?;
-        let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
-        let status = fs::read_to_string(BATTERY_STATUS).ok();
-        let lines = status_lines(
-            &uptime,
-            capacity.as_deref(),
-            status.as_deref(),
-            boot_mode.as_deref(),
-            touch,
-        );
-        canvas.render_status(&lines, touch);
-        framebuffer.present(canvas.pixels())?;
+        let on = SCREEN_ON.load(Ordering::Acquire);
+        if on && !was_on {
+            // Turned on by the power key.
+            last_use = Instant::now();
+        }
+        was_on = on;
+        if on && last_use.elapsed() >= SCREEN_TIMEOUT {
+            set_screen(false);
+            was_on = false;
+        } else if on {
+            let uptime = fs::read_to_string("/proc/uptime")?;
+            let capacity = fs::read_to_string(BATTERY_CAPACITY).ok();
+            let status = fs::read_to_string(BATTERY_STATUS).ok();
+            let lines = status_lines(
+                &uptime,
+                capacity.as_deref(),
+                status.as_deref(),
+                boot_mode.as_deref(),
+                touch,
+            );
+            canvas.render_status(&lines, touch);
+            framebuffer.present(canvas.pixels())?;
+        }
 
         // Redraw when the touch changes, and otherwise once a second. Only the
         // newest update matters if drawing fell behind.
         if let Ok(update) = touch_updates.recv_timeout(Duration::from_secs(1)) {
             touch = update;
             touch = touch_updates.try_iter().last().unwrap_or(touch);
+            last_use = Instant::now();
+            if !SCREEN_ON.load(Ordering::Acquire) {
+                set_screen(true);
+                was_on = true;
+            }
         }
+    }
+}
+
+fn set_screen(on: bool) {
+    SCREEN_ON.store(on, Ordering::Release);
+    let level = if on { BACKLIGHT_LEVEL } else { "0" };
+    if let Err(err) = fs::write(BACKLIGHT, level) {
+        log(&format!("backlight failed: {err}"));
     }
 }
 
@@ -459,7 +496,6 @@ fn run_power_key() -> io::Result<()> {
 
     let start = Instant::now();
     let mut key = PowerKey::default();
-    let mut screen_on = true;
     loop {
         let timeout = key.wait_limit(start.elapsed());
         let action = if wait_readable(&device, timeout)? {
@@ -470,13 +506,7 @@ fn run_power_key() -> io::Result<()> {
             key.tick(start.elapsed())
         };
         match action {
-            Some(Action::ToggleScreen) => {
-                screen_on = !screen_on;
-                let level = if screen_on { BACKLIGHT_LEVEL } else { "0" };
-                if let Err(err) = fs::write(BACKLIGHT, level) {
-                    log(&format!("backlight failed: {err}"));
-                }
-            }
+            Some(Action::ToggleScreen) => set_screen(!SCREEN_ON.load(Ordering::Acquire)),
             Some(Action::PowerOff) => {
                 log("power key: powering off");
                 let err = KernelPlatform.power_off();
@@ -490,6 +520,9 @@ fn run_power_key() -> io::Result<()> {
 /// Mounts /data, starts Wi-Fi, then keeps the network working. This runs apart from
 /// the console, so that a slow or stuck step cannot take away the way to fastboot.
 fn storage_and_network() {
+    if let Err(err) = fs::write(CPU_IO_IS_BUSY, "1") {
+        log(&format!("tuning: io_is_busy not set: {err}"));
+    }
     // Before the network starts. SSH stays off if this fails.
     match alpine::apply_firewall() {
         Ok(()) => log("firewall: ready"),
@@ -624,8 +657,8 @@ fn keep_network_working() -> ! {
     let mut connected = false;
     let mut next_time_sync = Instant::now();
     loop {
-        let status = wpa_cli(&["status"]).unwrap_or_default();
-        let now_connected = wifi::wpa_state(&status) == Some(WPA_COMPLETED);
+        let now_connected =
+            fs::read_to_string(WIFI_OPERSTATE).is_ok_and(|state| state.trim() == "up");
         if now_connected != connected {
             log(if now_connected { "wifi: connected" } else { "wifi: connection lost" });
             connected = now_connected;

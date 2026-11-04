@@ -1,0 +1,66 @@
+# label=tuned date=2026-11-04T21:31:23
+# Linux version 3.18.35+
+# uptime=77.88
+# run=1
+cpu.crc threads=1 value=66.6 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=259.0 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.6 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=439.9 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1541.9 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=5960.8 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1282 unit=MB/s
+mem.fill value=3600 unit=MB/s
+mem.read value=1263 unit=MB/s
+mem.latency size_kib=16 value=6.5 unit=ns
+mem.latency size_kib=256 value=18.0 unit=ns
+mem.latency size_kib=2048 value=176.3 unit=ns
+mem.latency size_kib=16384 value=209.5 unit=ns
+mem.latency size_kib=65536 value=218.6 unit=ns
+disk.read_sequential block_kib=1024 value=94.4 unit=MB/s
+disk.read_random block_kib=4 value=3491 unit=IOPS
+disk.write_sequential block_kib=1024 bytes=63963136 value=12.8 unit=MB/s
+disk.write_random block_kib=4 value=3012 unit=IOPS
+net.receive bytes=43057152 value=33.5 unit=Mbit/s
+net.send bytes=12517376 value=10.0 unit=Mbit/s
+# run=2
+cpu.crc threads=1 value=66.5 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=259.6 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.8 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=441.6 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1548.5 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=5953.1 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1258 unit=MB/s
+mem.fill value=3594 unit=MB/s
+mem.read value=1252 unit=MB/s
+mem.latency size_kib=16 value=6.5 unit=ns
+mem.latency size_kib=256 value=20.1 unit=ns
+mem.latency size_kib=2048 value=176.6 unit=ns
+mem.latency size_kib=16384 value=209.3 unit=ns
+mem.latency size_kib=65536 value=217.7 unit=ns
+disk.read_sequential block_kib=1024 value=94.5 unit=MB/s
+disk.read_random block_kib=4 value=3429 unit=IOPS
+disk.write_sequential block_kib=1024 bytes=130023424 value=17.2 unit=MB/s
+disk.write_random block_kib=4 value=3552 unit=IOPS
+net.receive bytes=46858240 value=37.3 unit=Mbit/s
+net.send bytes=17629184 value=14.1 unit=Mbit/s
+# run=3
+cpu.crc threads=1 value=66.5 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.crc threads=4 value=262.6 unit=MB/s online=0-3 cpu0_khz=1092000
+cpu.matrix threads=1 value=115.8 unit=Mflop/s online=0-1 cpu0_khz=1092000
+cpu.matrix threads=4 value=445.4 unit=Mflop/s online=0-3 cpu0_khz=1092000
+cpu.vector threads=1 value=1525.2 unit=MB/s online=0-1 cpu0_khz=1092000
+cpu.vector threads=4 value=6103.8 unit=MB/s online=0-3 cpu0_khz=1092000
+mem.copy value=1292 unit=MB/s
+mem.fill value=3611 unit=MB/s
+mem.read value=1257 unit=MB/s
+mem.latency size_kib=16 value=6.5 unit=ns
+mem.latency size_kib=256 value=18.7 unit=ns
+mem.latency size_kib=2048 value=176.1 unit=ns
+mem.latency size_kib=16384 value=209.3 unit=ns
+mem.latency size_kib=65536 value=217.6 unit=ns
+disk.read_sequential block_kib=1024 value=94.2 unit=MB/s
+disk.read_random block_kib=4 value=3487 unit=IOPS
+disk.write_sequential block_kib=1024 bytes=130023424 value=26.0 unit=MB/s
+disk.write_random block_kib=4 value=3593 unit=IOPS
+net.receive bytes=48365568 value=38.4 unit=Mbit/s
+net.send bytes=33095680 value=26.2 unit=Mbit/s

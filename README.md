@@ -167,6 +167,42 @@ again by itself after powering off.
 
 Not measured: USB networking, power use, and running on battery.
 
+### Tuning
+
+`scripts/tune-sweep.ps1` compares runtime settings and records them in
+`benchmarks/amazing-a32/`. A setting stays only if it measurably helps.
+
+| Setting | Result | Decision |
+|---|---|---|
+| `io_is_busy=1` on the `interactive` governor | Random reads 1771 to 3485 IOPS, random writes 1712 to 3725, sequential reads 67 to 94 MB/s. Idle CPU temperature within 0.4 C | Kept |
+| Screen off after 60 s, with no drawing | Idle CPU 12.2% to about 1.4% over 8 windows. One earlier window read 5.1%, not explained and not seen again | Kept |
+| Screen wake, checked by hand | A touch turned it on, it dimmed 60 s after the last use, and the power key turned it on and off | Works |
+| Reading `operstate` in place of running `wpa_cli` every 5 s | Part of the same idle result, not measured alone. It read `up`, `down`, `up` through a disconnect | Kept |
+| `performance` governor | No faster than `io_is_busy=1` | Not used |
+| Building for `cortex-a53` with NEON | CPU results within run-to-run variation | Not used |
+| I/O scheduler `deadline` or `noop` | No clear difference from `cfq` | Not used |
+| All 4 CPUs always online | No clear difference | Not used |
+| zram, 445 MiB of swap with `lzo` | Made things worse. A 1100 MB load finished 0 operations, spending about 25 s in the kernel, with only 1 to 2 MB swapped. The cause is not known | Not used |
+
+The `io_is_busy` figures come from 3 rounds with the settings in turn, because eMMC writes
+vary with time. The earlier baseline of about 2500 IOPS was raised by the screen drawing,
+which kept the CPU awake. Stopping the drawing alone would have lowered it to about 1771,
+so these two changes belong together. Sequential writes still vary widely, from 0.2 to
+26 MB/s, under every setting.
+
+Without swap, a 1100 MB load made the kernel kill only that program, 9 times. The console,
+SSH and Wi-Fi survived, and the phone did not restart. Other programs may not be so lucky,
+because all of them have the same priority for being killed.
+
+Wi-Fi is limited by the link. It connects at up to 65 Mbit/s, on 2.4 GHz with one stream
+and a 20 MHz channel, so 45 Mbit/s of TCP leaves little to gain in software. Results also
+depend on the time of day: an evening test gave 30 to 39 Mbit/s receiving and 8 to 21
+sending, with the link rate often at 39 and a strong signal of about -35 dBm, whether
+`io_is_busy` was on or off. Busy airwaves are a likely cause, but this was not proven.
+
+After tuning, compared with the baseline: integer and floating point on 4 CPUs rose about
+3%, which may only be the reduced idle work, and single CPU results did not change.
+
 ## Firmware
 
 Stock firmware download:
