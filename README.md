@@ -36,6 +36,7 @@ find FUSE, ext2 or ext3, which are all available.
 | CPU cores | One was online when idle, `cpu0`. How others come online was not checked |
 | CPU governor | `interactive`. Also `ondemand`, `userspace`, `powersave`, `performance` |
 | Listening sockets | None on TCP, TCP6 or UDP, measured after Wi-Fi joined a network |
+| Load average | About 6 when idle, because 6 MediaTek kernel threads, such as `hang_detect` and `bat_thread_kthr`, sleep in the uninterruptible state, which Linux counts as load. CPU use was about 1% at the same time, so the load average says nothing here |
 
 Partition sizes in MiB: `userdata` 3631, `system` 3072, `cache` 400, `metadata` 37,
 `nvdata` 32, `boot` 16, `recovery` 16. `nvdata` holds the Wi-Fi MAC address and
@@ -186,7 +187,7 @@ At 95 C on the CPU or 55 C on the battery the phone powers off. That has not bee
 tested, and neither has the cap at its real limit. With USB attached the phone starts
 again by itself after powering off.
 
-Not measured: USB networking, power use, and running on battery.
+Not measured: USB networking and power use. Running on battery will not be tested, because the phone runs on USB power as a server.
 
 ### Tuning
 
@@ -468,6 +469,8 @@ On battery at 3% or less, or under 3400 mV, for two checks in a row, it powers o
 cleanly, so that the voltage cannot fall far enough to cut power during a write. The
 percentage is an estimate, so either limit is enough. This has not been tested, and
 3400 mV is a common cutoff for this kind of battery, not one measured on this phone.
+It will stay untested, because the phone runs on USB power and battery tests were
+dropped.
 
 For its first moments, about 10 seconds after the kernel starts, the battery driver
 reads 0 mV, 50% and no charger. Such readings are ignored, since 0 mV would otherwise
@@ -608,7 +611,7 @@ Not tested:
 - A start without USB, and running on battery with Wi-Fi on.
 - A renewal at its real time, which is 36 hours away on this network. It was tested
   through the `dhcp` command, which runs the same code.
-- Running for longer than 2 hours.
+- Running for longer than 2 hours. A planned 7 day run was dropped in favor of new features.
 
 To record a network over time, which never joins or restarts anything:
 
