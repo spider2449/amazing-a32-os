@@ -20,10 +20,14 @@ pub enum Service {
     Network,
     /// Draws the screen and reacts to touches, at least once a second.
     Panel,
+    /// Watches the charger and powers off on an empty battery, once a minute.
+    Power,
 }
 
 impl Service {
-    pub const ALL: [Service; 4] = [Service::Reaper, Service::Thermal, Service::Network, Service::Panel];
+    pub const COUNT: usize = 5;
+    pub const ALL: [Service; Service::COUNT] =
+        [Service::Reaper, Service::Thermal, Service::Network, Service::Panel, Service::Power];
 
     pub fn index(self) -> usize {
         self as usize
@@ -35,6 +39,7 @@ impl Service {
             Service::Thermal => "thermal",
             Service::Network => "network",
             Service::Panel => "panel",
+            Service::Power => "power",
         }
     }
 
@@ -42,7 +47,7 @@ impl Service {
     /// loop's longest normal round, because a needless restart also costs service.
     pub fn limit(self) -> Duration {
         match self {
-            Service::Reaper | Service::Thermal | Service::Panel => Duration::from_secs(180),
+            Service::Reaper | Service::Thermal | Service::Panel | Service::Power => Duration::from_secs(180),
             Service::Network => Duration::from_secs(600),
         }
     }
@@ -51,7 +56,7 @@ impl Service {
 /// Finds a service whose last heartbeat is older than its limit. `beats` holds the
 /// time of each service's last heartbeat, by `Service::index`, or `None` for a
 /// service that has not started or has stopped on purpose.
-pub fn stalled(beats: &[Option<Duration>; 4], now: Duration) -> Option<(Service, Duration)> {
+pub fn stalled(beats: &[Option<Duration>; Service::COUNT], now: Duration) -> Option<(Service, Duration)> {
     Service::ALL.into_iter().find_map(|service| {
         let silent = now.saturating_sub(beats[service.index()]?);
         (silent > service.limit()).then_some((service, silent))
@@ -137,7 +142,7 @@ mod tests {
 
     #[test]
     fn finds_only_a_service_past_its_limit() {
-        let mut beats = [None; 4];
+        let mut beats = [None; Service::COUNT];
         assert_eq!(stalled(&beats, s(10_000)), None);
         beats[Service::Thermal.index()] = Some(s(1000));
         beats[Service::Network.index()] = Some(s(1000));
@@ -150,7 +155,7 @@ mod tests {
 
     #[test]
     fn a_heartbeat_from_after_now_is_not_a_stall() {
-        let beats = [Some(s(50)), None, None, None];
+        let beats = [Some(s(50)), None, None, None, None];
         assert_eq!(stalled(&beats, s(10)), None);
     }
 

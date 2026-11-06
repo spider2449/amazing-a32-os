@@ -331,7 +331,7 @@ volume down or both, with power. Fastboot has only been reached from software.
   Running on battery is unverified.
 - Plugging in USB can stop charging: the kernel may read a low charger voltage at
   that moment (`Charger under voltage`) and keep reporting `Not charging`. This
-  happened once in three replugs. Unplugging and replugging restored charging.
+  happened once in three replugs. Unplugging and replugging restored charging. The init now logs it and shows it on the panel.
 - The kernel in the image is newer than the build on the phone.
 
 ## Fail-safe
@@ -431,6 +431,34 @@ sh tail -n 50 /data/a32/log/init.log
 
 `scripts/console.ps1 -Lines LINE, LINE` sends console lines from the computer and prints
 what each returned.
+
+## Charger and battery monitor
+
+The stock battery services do not run, so the init checks the charger and the battery
+once a minute and logs:
+
+- A line every 15 minutes with the level, the battery voltage, the status and the
+  charger voltage, which records how long the battery lasts.
+- The charger being attached or removed.
+- Charging stopped for 5 minutes with the charger attached, the problem under Known
+  risks, and charging again afterwards. While stopped, the panel's battery level reads
+  `NOT CHARGING`. No software way to restart charging is known, so the log asks for USB
+  to be plugged in again.
+
+On battery at 3% or less, or under 3400 mV, for two checks in a row, it powers off
+cleanly, so that the voltage cannot fall far enough to cut power during a write. The
+percentage is an estimate, so either limit is enough. This has not been tested, and
+3400 mV is a common cutoff for this kind of battery, not one measured on this phone.
+
+For its first moments, about 10 seconds after the kernel starts, the battery driver
+reads 0 mV, 50% and no charger. Such readings are ignored, since 0 mV would otherwise
+count as an empty battery. Other devices may have the same delay.
+
+Test, from a RAM boot with the screen off: USB was unplugged for 2 minutes and then
+plugged in again. Both were logged within the minute, with the status `Not charging`
+while unplugged (not `Discharging`) and the charger at 18 mV. The phone kept running
+and stayed on the network, and charging resumed after the replug. That is one replug,
+so it does not rule out the problem under Known risks.
 
 ## Power key
 

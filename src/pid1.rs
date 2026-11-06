@@ -12,6 +12,7 @@
 //! itself, because the kernel is set to restart 1 second after one.
 
 use crate::alpine;
+use crate::charging::{self, Event as PowerEvent};
 use crate::dhcp::{self, MessageType};
 use crate::display::Canvas;
 use crate::fb::Framebuffer;
@@ -236,7 +237,7 @@ static STARTED: OnceLock<Instant> = OnceLock::new();
 
 /// Each service's last heartbeat, as whole seconds since `STARTED` plus one, by
 /// `Service::index`. Zero means not watched.
-static HEARTBEATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static HEARTBEATS: [AtomicU64; Service::COUNT] = [const { AtomicU64::new(0) }; Service::COUNT];
 
 /// Held while writing a log line, and true once lines also go to the persistent log.
 /// Holding it while switching on the persistent log keeps lines from going missing.
@@ -295,6 +296,17 @@ const BACKLIGHT_LEVEL: &str = "64";
 const SCREEN_TIMEOUT: Duration = Duration::from_secs(60);
 const BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
 const BATTERY_STATUS: &str = "/sys/class/power_supply/battery/status";
+const BATTERY_MILLIVOLTS: &str = "/sys/class/power_supply/battery/batt_vol";
+const CHARGER_MILLIVOLTS: &str = "/sys/class/power_supply/battery/ChargerVoltage";
+const CHARGER_ONLINE: &[&str] =
+    &["/sys/class/power_supply/usb/online", "/sys/class/power_supply/ac/online"];
+const POWER_CHECK: Duration = Duration::from_secs(60);
+const POWER_CHECK_EARLY: Duration = Duration::from_secs(5);
+// A battery line in the persistent log this often, which records battery life.
+const POWER_LOG_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Set while the charger is attached but charging has stopped.
+static CHARGING_STALLED: AtomicBool = AtomicBool::new(false);
 
 const SYSLOG_ACTION_READ_ALL: c_int = 3;
 const SYSLOG_ACTION_CONSOLE_LEVEL: c_int = 8;
@@ -416,6 +428,9 @@ pub fn run() -> ! {
     if let Err(err) = thread::Builder::new().spawn(storage_and_network) {
         log(&format!("network thread failed: {err}"));
     }
+    if let Err(err) = thread::Builder::new().spawn(power_service) {
+        log(&format!("power thread failed: {err}"));
+    }
     if let Err(err) = thread::Builder::new().spawn(watchdog_service) {
         log(&format!("watchdog thread failed: {err}"));
     }
@@ -432,6 +447,54 @@ pub fn run() -> ! {
         _ => {}
     }
     reap_forever()
+}
+
+fn read_power() -> charging::Reading {
+    let read = |path: &str| fs::read_to_string(path).map(|text| text.trim().to_string()).unwrap_or_default();
+    let number = |path: &str| read(path).parse().ok();
+    charging::Reading {
+        charger: CHARGER_ONLINE.iter().any(|path| read(path) == "1"),
+        status: read(BATTERY_STATUS),
+        capacity: number(BATTERY_CAPACITY),
+        battery_millivolts: number(BATTERY_MILLIVOLTS),
+        charger_millivolts: number(CHARGER_MILLIVOLTS),
+    }
+}
+
+/// Logs the charger and the battery, and powers off cleanly on an empty battery,
+/// before the voltage falls far enough to cut power in the middle of a write.
+fn power_service() {
+    let mut monitor = charging::Monitor::default();
+    let mut next_log = Duration::ZERO;
+    loop {
+        heartbeat(Service::Power);
+        let now = since_start();
+        let reading = read_power();
+        if !reading.is_ready() {
+            thread::sleep(POWER_CHECK_EARLY);
+            continue;
+        }
+        let events = monitor.update(now, &reading);
+        CHARGING_STALLED.store(monitor.is_stalled(), Ordering::Release);
+        for event in &events {
+            log(&format!("power: {}: {}", match event {
+                PowerEvent::ChargerAttached => "charger attached",
+                PowerEvent::ChargerRemoved => "charger removed",
+                PowerEvent::Stalled => "charging stopped with the charger attached, plug USB in again",
+                PowerEvent::Resumed => "charging again",
+                PowerEvent::Empty => "battery empty, powering off",
+            }, reading.describe()));
+        }
+        if events.contains(&PowerEvent::Empty) {
+            let err = KernelPlatform.power_off();
+            log(&format!("power: power off failed: {err}"));
+        }
+        if now >= next_log {
+            log(&format!("power: {}", reading.describe()));
+            next_log = now + POWER_LOG_INTERVAL;
+        }
+        thread::sleep(POWER_CHECK);
+    }
 }
 
 fn since_start() -> Duration {
@@ -696,7 +759,11 @@ fn snapshot() -> Snapshot {
         cpu_temperature: degrees(CPU_ZONE),
         memory: format!("{} of {} MB free", megabytes("MemAvailable:"), megabytes("MemTotal:")),
         disk: free_disk_text(),
-        battery: format!("{}% {}", read(BATTERY_CAPACITY).trim(), read(BATTERY_STATUS).trim()),
+        battery: if CHARGING_STALLED.load(Ordering::Acquire) {
+            format!("{}% NOT CHARGING", read(BATTERY_CAPACITY).trim())
+        } else {
+            format!("{}% {}", read(BATTERY_CAPACITY).trim(), read(BATTERY_STATUS).trim())
+        },
         battery_temperature: degrees(BATTERY_ZONE),
     }
 }
