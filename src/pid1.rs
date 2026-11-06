@@ -23,11 +23,13 @@ use crate::thermal::{self, Action as ThermalAction};
 use crate::ui::{Request, Snapshot, Ui};
 use crate::usb;
 use crate::watchdog::{self, NetworkWatch, Service};
+use crate::web::{self, Route};
 use crate::wifi;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{Ipv4Addr, ToSocketAddrs, UdpSocket};
+use std::io::{Seek, SeekFrom};
+use std::net::{Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
@@ -230,6 +232,12 @@ const STABLE_UPTIME: Duration = Duration::from_secs(600);
 const STABLE_UPTIME_TEST: Option<&str> = option_env!("A32_STABLE_S");
 const NETWORK_LIMIT_TEST: Option<&str> = option_env!("A32_NETWORK_LIMIT_S");
 const AED_REBOOT_REASON: &str = "/proc/aed/reboot-reason";
+// A slow or silent client is dropped after this, because requests are served one at
+// a time.
+const WEB_TIMEOUT: Duration = Duration::from_secs(5);
+const WEB_LOG_LINES: usize = 40;
+// Enough for the lines above, so that a 1 MiB log is not read for each request.
+const WEB_LOG_BYTES: u64 = 16 * 1024;
 
 /// When this process started. Watchdog times count from here, because the wall
 /// clock jumps when it is set.
@@ -495,6 +503,84 @@ fn power_service() {
         }
         thread::sleep(POWER_CHECK);
     }
+}
+
+/// Serves the status page, one request at a time.
+fn web_service() {
+    let listener = match TcpListener::bind(("0.0.0.0", web::PORT)) {
+        Ok(listener) => listener,
+        Err(err) => {
+            log(&format!("web: not started: {err}"));
+            return;
+        }
+    };
+    log(&format!("web: status page on port {}", web::PORT));
+    for connection in listener.incoming() {
+        match connection {
+            // A client that leaves early or stays silent is normal, so not logged.
+            Ok(stream) => {
+                let _ = serve_web(stream);
+            }
+            Err(err) => {
+                log(&format!("web: accept failed: {err}"));
+                thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+fn serve_web(mut stream: TcpStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(WEB_TIMEOUT))?;
+    stream.set_write_timeout(Some(WEB_TIMEOUT))?;
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        if request.len() >= web::REQUEST_LIMIT {
+            let reply = web::response("431 Request Header Fields Too Large", "text/plain; charset=utf-8", "too large\n");
+            return stream.write_all(&reply);
+        }
+        let length = stream.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..length]);
+    }
+    let plain = "text/plain; charset=utf-8";
+    let reply = match web::route(&String::from_utf8_lossy(&request)) {
+        Route::Page => {
+            let tail = web::last_lines(&log_tail(), WEB_LOG_LINES);
+            web::response("200 OK", "text/html; charset=utf-8", &web::page(&snapshot(), &wall_clock_text(), &tail))
+        }
+        Route::Json => web::response("200 OK", "application/json", &web::json(&snapshot(), &wall_clock_text())),
+        Route::NotFound => web::response("404 Not Found", plain, "not found\n"),
+        Route::MethodNotAllowed => web::response("405 Method Not Allowed", plain, "only GET\n"),
+        Route::BadRequest => web::response("400 Bad Request", plain, "bad request\n"),
+    };
+    stream.write_all(&reply)
+}
+
+/// The end of the persistent log, or of this session's log if /data is not mounted.
+fn log_tail() -> String {
+    let path = if DATA_READY.load(Ordering::Acquire) && Path::new(PERSISTENT_LOG).exists() {
+        PERSISTENT_LOG
+    } else {
+        INIT_LOG
+    };
+    let read = || -> io::Result<String> {
+        let mut file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let start = length.saturating_sub(WEB_LOG_BYTES);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A read from the middle starts inside a line.
+        Ok(match text.split_once('\n') {
+            Some((_, rest)) if start > 0 => rest.to_string(),
+            _ => text,
+        })
+    };
+    read().unwrap_or_else(|err| format!("log not readable: {err}"))
 }
 
 fn since_start() -> Duration {
@@ -953,7 +1039,13 @@ fn storage_and_network() {
     }
     // Before the network starts. SSH stays off if this fails.
     match alpine::apply_firewall() {
-        Ok(()) => log("firewall: ready"),
+        Ok(()) => {
+            log("firewall: ready");
+            // Only behind the firewall, like SSH.
+            if let Err(err) = thread::Builder::new().spawn(web_service) {
+                log(&format!("web: thread failed: {err}"));
+            }
+        }
         Err(err) => log(&format!("firewall: failed: {err}")),
     }
     match mount_data() {

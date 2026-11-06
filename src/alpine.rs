@@ -34,9 +34,10 @@ const SSHD_CHECK: Duration = Duration::from_secs(5);
 
 const IPTABLES: &str = "/system/bin/iptables";
 const IP6TABLES: &str = "/system/bin/ip6tables";
-// SSH is only for local networks. A router that forwards a port does not change
-// the source address, so this also refuses the internet.
-const SSH_SOURCES: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+// SSH and the status page are only for local networks. A router that forwards a port
+// does not change the source address, so this also refuses the internet.
+const LOCAL_SOURCES: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+const LOCAL_PORTS: &[&str] = &["22", crate::web::PORT_TEXT];
 
 /// Set when all firewall rules are in place. SSH does not start without them.
 static FIREWALL_READY: AtomicBool = AtomicBool::new(false);
@@ -78,8 +79,10 @@ pub fn apply_firewall() -> io::Result<()> {
         // DHCP replies, which are broadcast and so never look like an open connection.
         vec!["-A", "INPUT", "-p", "udp", "--dport", "68", "-j", "ACCEPT"],
     ];
-    for source in SSH_SOURCES {
-        rules.push(vec!["-A", "INPUT", "-p", "tcp", "--dport", "22", "-s", source, "-j", "ACCEPT"]);
+    for port in LOCAL_PORTS {
+        for source in LOCAL_SOURCES {
+            rules.push(vec!["-A", "INPUT", "-p", "tcp", "--dport", port, "-s", source, "-j", "ACCEPT"]);
+        }
     }
     for rule in &rules {
         table_command(IPTABLES, rule)?;

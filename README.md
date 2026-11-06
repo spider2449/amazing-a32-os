@@ -124,9 +124,10 @@ Known limits:
 ## Firewall
 
 The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic
-is dropped, except replies to connections from the phone, ping, DHCP replies, and SSH from
-private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). All incoming IPv6 is
-dropped. `sshd` does not start unless all rules were applied. `recv` and `bench net` open
+is dropped, except replies to connections from the phone, ping, DHCP replies, and SSH and the
+status page from private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). All
+incoming IPv6 is dropped. Neither `sshd` nor the status page starts unless all rules were
+applied. `recv` and `bench net` open
 their port only while they run. The `conntrack` match is missing here, but `state` works.
 
 From the PC, ping worked and a closed port did not connect. Refusing a public source
@@ -451,6 +452,24 @@ sh tail -n 50 /data/a32/log/init.log
 
 `scripts/console.ps1 -Lines LINE, LINE` sends console lines from the computer and prints
 what each returned.
+
+## Status page
+
+`http://PHONE_ADDRESS/` shows what the panel's home page shows, and the last 40 lines of
+the persistent log. It reloads itself every 15 seconds. `/status.json` has the same
+values for scripts. The page only reads: it takes nothing but the path, so it has no
+login, and the firewall only lets private addresses reach port 80. It is part of the
+init, with no web server program.
+
+Requests are served one at a time, so that no client can use up the phone's memory or
+threads. A client that connects and sends nothing therefore delays the others by up to
+5 seconds, its time limit. Requests over 4 KiB get `431`, other methods than `GET` get
+`405`, and other paths `404`.
+
+Tested from the PC on a RAM boot: the page, the JSON, `404` for `/nope` and
+`/../etc/passwd`, `405` for `POST`, `431` for 6000 bytes of headers, and a request
+answered 5 seconds after a silent connection. The page was also checked in a browser.
+The SSID and log lines are escaped, so a network name cannot add HTML to the page.
 
 ## Charger and battery monitor
 
