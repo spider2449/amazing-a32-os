@@ -36,6 +36,8 @@ mod ui;
 #[cfg(any(target_os = "linux", test))]
 mod usb;
 #[cfg(any(target_os = "linux", test))]
+mod watchdog;
+#[cfg(any(target_os = "linux", test))]
 mod wifi;
 
 fn main() {

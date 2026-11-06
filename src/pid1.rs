@@ -5,8 +5,11 @@
 //! PID 1 must never exit, because that panics the kernel and reboots the phone.
 //!
 //! The phone can only reach fastboot from software, because no key combination
-//! does it. So if this process panics or the console cannot start, it reboots to
-//! fastboot, where the system can be repaired. A kernel panic is not covered.
+//! does it. So if this process panics early or the console cannot start, it reboots
+//! to fastboot, where the system can be repaired. A panic after the system has run
+//! for a while restarts it normally instead, and so does a service that stops
+//! making progress, as decided in `watchdog`. A kernel panic restarts the phone by
+//! itself, because the kernel is set to restart 1 second after one.
 
 use crate::alpine;
 use crate::dhcp::{self, MessageType};
@@ -18,6 +21,7 @@ use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
 use crate::ui::{Request, Snapshot, Ui};
 use crate::usb;
+use crate::watchdog::{self, NetworkWatch, Service};
 use crate::wifi;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -29,8 +33,8 @@ use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong, c_void};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock, TryLockError};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -205,6 +209,38 @@ const CONSOLE_READY_INFO: &str = "/run/console-ready";
 const USB_STATE: &str = "/sys/class/android_usb/android0/state";
 // Time for the kernel log and the screen to settle before restarting.
 const FAIL_SAFE_DELAY: Duration = Duration::from_secs(3);
+// The log kept across restarts, so that the reason for one can be read afterwards.
+// Lines are appended without waiting for the eMMC, and ext4 commits them within
+// about 5 seconds. One older file is kept, so this uses at most twice the limit.
+const PERSISTENT_LOG_DIR: &str = "/data/a32/log";
+const PERSISTENT_LOG: &str = "/data/a32/log/init.log";
+const PERSISTENT_LOG_OLD: &str = "/data/a32/log/init.log.1";
+const PERSISTENT_LOG_LIMIT: u64 = 1024 * 1024;
+const WATCHDOG_CHECK: Duration = Duration::from_secs(10);
+// How long a restart waits for the eMMC to take cached writes. A stuck eMMC must not
+// stop the restart that may repair it.
+const RESTART_SYNC_WAIT: Duration = Duration::from_secs(15);
+const SYSRQ_TRIGGER: &str = "/proc/sysrq-trigger";
+// Restarts in a row because the network was lost. The wait grows with each one.
+const NETWORK_RESTARTS: &str = "/data/a32/network-restarts";
+// How long the system must have run before a panic restarts it normally.
+const STABLE_UPTIME: Duration = Duration::from_secs(600);
+// Shorter limits for an image built to test the watchdog. Never flash one.
+const STABLE_UPTIME_TEST: Option<&str> = option_env!("A32_STABLE_S");
+const NETWORK_LIMIT_TEST: Option<&str> = option_env!("A32_NETWORK_LIMIT_S");
+const AED_REBOOT_REASON: &str = "/proc/aed/reboot-reason";
+
+/// When this process started. Watchdog times count from here, because the wall
+/// clock jumps when it is set.
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+/// Each service's last heartbeat, as whole seconds since `STARTED` plus one, by
+/// `Service::index`. Zero means not watched.
+static HEARTBEATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// Held while writing a log line, and true once lines also go to the persistent log.
+/// Holding it while switching on the persistent log keeps lines from going missing.
+static PERSISTENT_LOG_ON: Mutex<bool> = Mutex::new(false);
 
 /// Set when the console device exists. A host does not need to be attached, so
 /// running on battery without USB does not count as a failure.
@@ -299,8 +335,18 @@ const DEVICES: &[(&str, u32, u32, c_uint)] = &[
 
 /// Boots userspace. Never returns.
 pub fn run() -> ! {
+    STARTED.get_or_init(Instant::now);
     // The hook never returns, which stops panic=abort from killing PID 1.
-    std::panic::set_hook(Box::new(|info| fail_safe(&format!("panic: {info}"))));
+    std::panic::set_hook(Box::new(|info| {
+        let stable = STABLE_UPTIME_TEST
+            .and_then(|text| text.parse().ok())
+            .map_or(STABLE_UPTIME, Duration::from_secs);
+        if watchdog::panic_restarts_normally(since_start(), stable) {
+            restart(&format!("panic: {info}"))
+        } else {
+            fail_safe(&format!("panic: {info}"))
+        }
+    }));
 
     // Failures are collected because `/dev/kmsg` does not exist until the
     // device nodes below have been created.
@@ -337,6 +383,10 @@ pub fn run() -> ! {
         log(error);
     }
     log(&crate::probe::report());
+    match fs::read_to_string(AED_REBOOT_REASON) {
+        Ok(text) => log(&format!("previous reset: {}", watchdog::previous_reset(&text).unwrap_or("unknown"))),
+        Err(err) => log(&format!("previous reset: {err}")),
+    }
 
     // A software restart is a normal boot, even with USB attached.
     if fs::read_to_string(BOOT_MODE).is_ok_and(|mode| mode.trim() == CHARGER_BOOT_MODE) {
@@ -366,12 +416,129 @@ pub fn run() -> ! {
     if let Err(err) = thread::Builder::new().spawn(storage_and_network) {
         log(&format!("network thread failed: {err}"));
     }
+    if let Err(err) = thread::Builder::new().spawn(watchdog_service) {
+        log(&format!("watchdog thread failed: {err}"));
+    }
 
     log("boot complete");
-    if FAULT == Some("panic") {
-        panic!("injected fault");
+    match FAULT {
+        Some("panic") => panic!("injected fault"),
+        Some("late-panic") => {
+            let _ = thread::Builder::new().spawn(|| {
+                thread::sleep(Duration::from_secs(90));
+                panic!("injected late fault");
+            });
+        }
+        _ => {}
     }
     reap_forever()
+}
+
+fn since_start() -> Duration {
+    STARTED.get_or_init(Instant::now).elapsed()
+}
+
+/// Tells the watchdog that a service's loop went round.
+fn heartbeat(service: Service) {
+    HEARTBEATS[service.index()].store(since_start().as_secs() + 1, Ordering::Release);
+}
+
+/// Stops watching a service that ended on purpose, such as a missing display.
+fn retire(service: Service) {
+    HEARTBEATS[service.index()].store(0, Ordering::Release);
+}
+
+/// Restarts the phone when a service stops or the network stays lost. This must not
+/// wait on anything a stuck service may hold, so the lease is only tried.
+fn watchdog_service() {
+    let first_limit = NETWORK_LIMIT_TEST
+        .and_then(|text| text.parse().ok())
+        .map_or(watchdog::NETWORK_LOST_LIMIT, Duration::from_secs);
+    let mut network = NetworkWatch::default();
+    // Read once /data is mounted. Before that no network can be saved.
+    let mut network_restarts: Option<u32> = None;
+    loop {
+        thread::sleep(WATCHDOG_CHECK);
+        let now = since_start();
+        let beats = std::array::from_fn(|index| match HEARTBEATS[index].load(Ordering::Acquire) {
+            0 => None,
+            seconds => Some(Duration::from_secs(seconds - 1)),
+        });
+        if let Some((service, silent)) = watchdog::stalled(&beats, now) {
+            restart(&format!("{} made no progress for {} s", service.name(), silent.as_secs()));
+        }
+
+        if !DATA_READY.load(Ordering::Acquire) {
+            continue;
+        }
+        let restarts = *network_restarts.get_or_insert_with(|| {
+            fs::read_to_string(NETWORK_RESTARTS).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0)
+        });
+        // Low battery mode leaves Wi-Fi off on purpose.
+        let wifi_off = fs::read_to_string(WIFI_STATE).is_ok_and(|state| state.starts_with("off"));
+        let saved = !wifi_off && Path::new(SAVED_NETWORK).exists();
+        let Ok(lease) = LEASE.try_lock() else {
+            continue;
+        };
+        let working = lease.applied.is_some()
+            && fs::read_to_string(WIFI_OPERSTATE).is_ok_and(|state| state.trim() == "up");
+        drop(lease);
+        if working && restarts > 0 {
+            match fs::remove_file(NETWORK_RESTARTS) {
+                Ok(()) => log("watchdog: the network works again"),
+                Err(err) => log(&format!("watchdog: restart count not cleared: {err}")),
+            }
+            network_restarts = Some(0);
+        }
+        let limit = watchdog::network_lost_limit(first_limit, restarts);
+        if network.update(now, saved, working, limit) {
+            let count = format!("{}\n", restarts + 1);
+            let finished = within(RESTART_SYNC_WAIT, move || {
+                if let Err(err) = write_private_file(NETWORK_RESTARTS, &count) {
+                    log(&format!("watchdog: restart count not saved: {err}"));
+                }
+            });
+            if !finished {
+                log_without_waiting("watchdog: saving the restart count did not finish");
+            }
+            restart(&format!(
+                "the saved network did not work for {} s, restart {} in a row for this",
+                limit.as_secs(),
+                restarts + 1
+            ));
+        }
+    }
+}
+
+/// Restarts normally, for a fault a restart may repair. Never returns.
+fn restart(reason: &str) -> ! {
+    log_without_waiting(&format!("watchdog: restarting: {reason}"));
+    let synced = within(RESTART_SYNC_WAIT, || {
+        // SAFETY: `sync` takes no arguments and has no memory safety requirements.
+        unsafe { sync() }
+    });
+    if !synced {
+        log_without_waiting("watchdog: cached writes did not finish, restarting anyway");
+    }
+    // SAFETY: this reboot command takes no pointer arguments.
+    unsafe { syscall(SYS_REBOOT, REBOOT_MAGIC1, REBOOT_MAGIC2, REBOOT_CMD_RESTART, 0) };
+    log_without_waiting(&format!("watchdog: restart failed: {}, trying sysrq", io::Error::last_os_error()));
+    if let Err(err) = fs::write(SYSRQ_TRIGGER, "b") {
+        log_without_waiting(&format!("watchdog: sysrq failed: {err}"));
+    }
+    park()
+}
+
+/// Runs `work` on its own thread and waits for it at most `limit`, for work that a
+/// stuck eMMC can hold up. Returns whether it finished. Unfinished work goes on in
+/// the background.
+fn within(limit: Duration, work: impl FnOnce() + Send + 'static) -> bool {
+    let (done, finished) = mpsc::channel();
+    let started = thread::Builder::new().spawn(move || {
+        work();
+        let _ = done.send(());
+    });
+    started.is_ok() && finished.recv_timeout(limit).is_ok()
 }
 
 /// Reboots to fastboot, the only way to repair the system. Never returns.
@@ -393,7 +560,9 @@ fn console_deadline() {
 
 /// Runs the status screen. A display failure leaves the console usable.
 fn status_screen() {
-    if let Err(err) = run_status_screen() {
+    let result = run_status_screen();
+    retire(Service::Panel);
+    if let Err(err) = result {
         log(&format!("display stopped: {err}"));
         let _ = fs::write(DISPLAY_INFO, format!("stopped: {err}\n"));
     }
@@ -436,6 +605,7 @@ fn run_status_screen() -> io::Result<()> {
     // A touch that wakes the screen must not also press a button under the finger.
     let mut waking = false;
     loop {
+        heartbeat(Service::Panel);
         let on = SCREEN_ON.load(Ordering::Acquire);
         if on && !was_on {
             // Turned on by the power key.
@@ -723,6 +893,9 @@ fn storage_and_network() {
         Ok(()) => {
             DATA_READY.store(true, Ordering::Release);
             log("data: mounted");
+            if let Err(err) = start_persistent_log() {
+                log(&format!("log: not kept across restarts: {err}"));
+            }
             if let Err(err) = restore_wifi_calibration() {
                 log(&format!("wifi: no calibration from nvdata: {err}"));
             }
@@ -848,6 +1021,7 @@ fn keep_network_working() -> ! {
     let mut connected = false;
     let mut next_time_sync = Instant::now();
     loop {
+        heartbeat(Service::Network);
         let now_connected =
             fs::read_to_string(WIFI_OPERSTATE).is_ok_and(|state| state.trim() == "up");
         if now_connected != connected {
@@ -998,6 +1172,7 @@ fn thermal_service() {
     let cap_at = CPU_CAP_TEST_DEGREES.and_then(|text| text.parse().ok()).unwrap_or(CPU_CAP_DEGREES);
     let mut policy = thermal::Policy::new(cap_at);
     loop {
+        heartbeat(Service::Thermal);
         let cpu = zone_temperature(CPU_ZONE);
         let battery = zone_temperature(BATTERY_ZONE);
         let result = match policy.decide(cpu, battery) {
@@ -1022,6 +1197,10 @@ fn thermal_service() {
             THERMAL_STATE,
             format!("capped: {}\ncpu: {cpu:?}\nbattery: {battery:?}\n", policy.is_capped()),
         );
+        if FAULT == Some("stall") {
+            log("thermal: injected stall");
+            park();
+        }
         thread::sleep(THERMAL_CHECK);
     }
 }
@@ -1655,24 +1834,85 @@ fn make_device(path: &str, mode: c_uint, major: u32, minor: u32) -> io::Result<(
 /// Writes one record per line to the kernel log. Errors are ignored because
 /// there is nowhere else to report them this early in boot.
 pub fn log(message: &str) {
+    write_log(message, true);
+}
+
+/// Logs without waiting for another thread's log line, for a restart that must
+/// happen even if a stuck eMMC holds that thread. The line may then miss /data.
+fn log_without_waiting(message: &str) {
+    write_log(message, false);
+}
+
+fn write_log(message: &str, wait: bool) {
     if let Ok(mut kmsg) = OpenOptions::new().write(true).open("/dev/kmsg") {
         for line in message.lines() {
             let _ = writeln!(kmsg, "a32-init: {line}");
         }
     }
+    let guard = if wait {
+        Some(PERSISTENT_LOG_ON.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    } else {
+        match PERSISTENT_LOG_ON.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    };
+    let persistent = guard.as_deref().copied().unwrap_or(false);
+    let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
+    let seconds = uptime.split_whitespace().next().unwrap_or("?");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(INIT_LOG) {
-        let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
-        let seconds = uptime.split_whitespace().next().unwrap_or("?");
         for line in message.lines() {
             let _ = writeln!(file, "[{seconds}] {line}");
         }
     }
+    if persistent {
+        if let Ok(mut file) = open_persistent_log() {
+            let now = wall_clock_text();
+            for line in message.lines() {
+                let _ = writeln!(file, "{now} [{seconds}] {line}");
+            }
+        }
+    }
+}
+
+/// Starts copying log lines to /data, beginning with the lines of this session so far.
+fn start_persistent_log() -> io::Result<()> {
+    let mut on = PERSISTENT_LOG_ON.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fs::create_dir_all(PERSISTENT_LOG_DIR)?;
+    fs::set_permissions(PERSISTENT_LOG_DIR, fs::Permissions::from_mode(0o700))?;
+    let earlier = fs::read_to_string(INIT_LOG).unwrap_or_default();
+    let mut file = open_persistent_log()?;
+    // Lines from before /data was mounted get the time they were copied, but keep
+    // their uptime. The clock comes from the RTC until the network sets it.
+    let now = wall_clock_text();
+    writeln!(file, "{now} --- session start ---")?;
+    for line in earlier.lines() {
+        writeln!(file, "{now} {line}")?;
+    }
+    *on = true;
+    Ok(())
+}
+
+/// Opens the persistent log for appending, first moving a full one aside.
+fn open_persistent_log() -> io::Result<File> {
+    if fs::metadata(PERSISTENT_LOG).is_ok_and(|meta| meta.len() >= PERSISTENT_LOG_LIMIT) {
+        fs::rename(PERSISTENT_LOG, PERSISTENT_LOG_OLD)?;
+    }
+    OpenOptions::new().create(true).append(true).mode(0o600).open(PERSISTENT_LOG)
+}
+
+fn wall_clock_text() -> String {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or_else(|_| "before-1970".to_string(), |elapsed| watchdog::utc_text(elapsed.as_secs()))
 }
 
 /// Collects children nobody is waiting for, such as orphans. It skips a round while
 /// a child is being waited for, without queueing, so that it never delays others.
 fn reap_forever() -> ! {
     loop {
+        heartbeat(Service::Reaper);
         if let Ok(_nobody_waiting) = WAITED_CHILDREN.try_write() {
             loop {
                 let mut status = 0;

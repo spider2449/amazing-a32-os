@@ -28,7 +28,9 @@ find FUSE, ext2 or ext3, which are all available.
 | Filesystems | ext2, ext3, ext4, vfat, msdos, iso9660, FUSE, tmpfs. No overlay, squashfs or f2fs |
 | Namespaces | `mnt` only, so containers such as Docker are not possible |
 | Cgroups | `cpu`, `cpuacct`, `freezer` and `debug`. No memory controller |
-| Missing | `/dev/net/tun`, `/dev/loop-control`, `/proc/config.gz`, DRM |
+| Missing | `/proc/config.gz`, DRM, the hung task and soft lockup detectors |
+| Not created yet | `tun` and `loop-control` are registered misc devices, listed in `/sys/class/misc`, but the init does not make their `/dev` nodes. An earlier check missed them for that reason. Neither has been tried |
+| Watchdogs | The kernel kicks the hardware watchdog every 20 s from its own threads. MediaTek's hang detector, `/dev/RT_Monitor`, only reports. See Watchdog |
 | Sleep states | `freeze`, `mem`, not tried |
 | CPU | ARMv7 mode with NEON, VFPv4, integer divide and SHA-2. At most 1092 MHz |
 | CPU cores | One was online when idle, `cpu0`. How others come online was not checked |
@@ -335,11 +337,13 @@ volume down or both, with power. Fastboot has only been reached from software.
 ## Fail-safe
 
 No key combination reaches fastboot, so the init reboots to fastboot by itself if
-it panics, if the USB console setup fails, or if that setup has not finished after
-60 seconds. A missing USB host is not a failure: the console became ready with the
-USB state still `DISCONNECTED`, and the system kept running past the deadline after
-USB was unplugged. `/run/console-ready` records that moment. A kernel panic is not
-covered.
+it panics in its first 10 minutes, if the USB console setup fails, or if that setup
+has not finished after 60 seconds. A later panic restarts normally, as described
+under Watchdog. A missing USB host is not a failure: the console became ready with
+the USB state still `DISCONNECTED`, and the system kept running past the deadline
+after USB was unplugged. `/run/console-ready` records that moment. The kernel is set
+to restart 1 second after a kernel panic (`panic=1`, `panic_on_oops=1`), which has
+not been tested.
 
 Each case was tested with a RAM boot, using an image built with a fault:
 
@@ -348,6 +352,85 @@ A32_FAULT=panic scripts/build-image.sh   # or usb, hang
 ```
 
 Rebuild without `A32_FAULT` afterwards, and never flash a fault image.
+
+## Watchdog
+
+The init restarts the phone normally, which is the only repair an unattended phone
+can make for itself, when:
+
+- A loop stops reporting progress: 180 seconds for the reaper, the thermal service and
+  the panel, and 600 seconds for the network loop, whose round can include DHCP, DNS
+  and three time servers. A loop that ends on purpose, such as the panel without a
+  display, is no longer watched.
+- A network is saved and has not worked, meaning no lease or `wlan0` not up, for 30
+  minutes. After each such restart in a row the wait doubles, up to 24 hours, so a
+  router that is gone for days does not restart the phone every half hour. The count
+  is kept in `/data/a32/network-restarts` and removed once the network works. Low
+  battery mode, which leaves Wi-Fi off, is not counted.
+- The init panics after running for 10 minutes. Such an image booted and started its
+  console, so the panic is treated as a passing fault, not a broken image.
+
+A restart first waits at most 15 seconds for cached writes, so that a stuck eMMC
+cannot stop the restart that may repair it, and falls back to `sysrq` if the restart
+call fails. The console and the SSH service are not watched: both wait on input or a
+child for as long as it takes, so a missing heartbeat would not mean a fault.
+
+What the kernel offers, read on this phone:
+
+- The hardware watchdog is kicked by the kernel's `wdtk` threads every 20 seconds
+  (`/proc/wdk`), so it only catches a hung kernel. There is no `/dev/watchdog`.
+- MediaTek's hang detector, `/dev/RT_Monitor` (misc 10:57), is the watchdog Android's
+  `system_server` uses. It was armed with ioctl `0x8004700A`, whose argument is
+  seconds, counted in 30 second steps. It disarms itself unless a process named
+  `system_server` exists. With such a process it counted down, then at zero only
+  dumped thread stacks every 30 seconds ("we should triger Kernel API DB", a report
+  for Android's crash service). It was still counting at -9, about 5 minutes past
+  zero, with no restart, so it is not used. Other MediaTek phones may behave the same.
+- The kernel has no hung task or soft lockup detector.
+- `/proc/aed/reboot-reason` starts with a line such as `WDT status: 2 fiq step: 0
+  exception type: 0`, which the init logs at start as the previous reset. It read
+  `WDT status: 2` after a `reboot bootloader`, so 2 does not mean a watchdog reset.
+  The other values have not been seen.
+
+Test results, from RAM boots of images built for each test, restarting into this
+system from the boot partition:
+
+| Test | Result |
+|---|---|
+| `A32_FAULT=stall`: the thermal loop stops after its first round | Restarted at 190 s of uptime: `thermal made no progress for 180 s` |
+| `A32_FAULT=late-panic A32_STABLE_S=60`: a panic at 100 s | Restarted normally, not to fastboot, and logged the panic message |
+| `A32_NETWORK_LIMIT_S=60`, then `wpa_cli disconnect` | Lost at 39 s, restarted at 100 s, count `1`. The next session joined and removed the count |
+
+The normal image then ran 450 seconds with no restart, and used 0.97% of the CPU over
+5 minutes with the screen off, about the same as before the watchdog.
+
+The doubling of the network wait is only unit tested, because it needs the saved
+network to stay unreachable across restarts. A stuck eMMC and a failed restart call
+have not been tested.
+
+```sh
+A32_FAULT=stall scripts/build-image.sh                        # or late-panic, with A32_STABLE_S=60
+A32_NETWORK_LIMIT_S=60 scripts/build-image.sh
+```
+
+Never flash these images. `scripts/ram-boot.ps1 -Image IMAGE` boots one from RAM.
+
+## Logs
+
+The init logs to the kernel log, to `/run/init.log`, and, once `/data` is mounted, to
+`/data/a32/log/init.log`, which survives restarts. Each session there starts with
+`--- session start ---` and the lines logged before `/data` was mounted. Lines carry
+the UTC time and the uptime. The time comes from the RTC until the network sets the
+clock, and was right in the tests. At 1 MiB the file moves to `init.log.1`, replacing
+the older one. Lines are not flushed one by one, so a power cut can lose the last few
+seconds. No passphrase is logged. To read it on the console:
+
+```text
+sh tail -n 50 /data/a32/log/init.log
+```
+
+`scripts/console.ps1 -Lines LINE, LINE` sends console lines from the computer and prints
+what each returned.
 
 ## Power key
 
