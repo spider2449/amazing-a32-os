@@ -36,6 +36,7 @@ find FUSE, ext2 or ext3, which are all available.
 | CPU cores | One was online when idle, `cpu0`. How others come online was not checked |
 | CPU governor | `interactive`. Also `ondemand`, `userspace`, `powersave`, `performance` |
 | Listening sockets | None on TCP, TCP6 or UDP, measured after Wi-Fi joined a network |
+| Bluetooth | No kernel Bluetooth stack: no `/sys/class/bluetooth` and no `vhci`, so BlueZ cannot run. MediaTek's `/dev/stpbt` takes HCI commands directly. See Bluetooth |
 | Load average | About 6 when idle, because 6 MediaTek kernel threads, such as `hang_detect` and `bat_thread_kthr`, sleep in the uninterruptible state, which Linux counts as load. CPU use was about 1% at the same time, so the load average says nothing here |
 
 Partition sizes in MiB: `userdata` 3631, `system` 3072, `cache` 400, `metadata` 37,
@@ -676,6 +677,34 @@ Requirements found on the way, which other devices may share:
   it. Whether this failed or the driver replaced it was not determined.
 
 The `sh LINE` console command runs a line with the stock shell.
+
+## Bluetooth
+
+The kernel has no Bluetooth stack, so BlueZ and `bluetoothctl` cannot run. The radio is
+still usable through `/dev/stpbt` (major 192), MediaTek's character device, which takes
+HCI commands as H4 packets, the way Android's Bluetooth library uses it. Opening it turns
+Bluetooth on through the WMT driver, and closing it turns it off. The init already
+creates the device as part of the Wi-Fi start.
+
+Test results, from a RAM boot with Wi-Fi connected:
+
+- HCI reset worked. The chip reports HCI version 8, which is Bluetooth 4.2, from
+  manufacturer `0x0046`, MediaTek.
+- The Bluetooth address read `00:00:46:03:35:01`, which looks like a default. Android
+  sets the real one from NVRAM, and where this phone keeps it has not been checked.
+- A passive BLE scan of 8 seconds received 265 and 266 advertisements from 21 and 22
+  devices, in two runs, the strongest at -65 dBm.
+- Wi-Fi stayed connected while Bluetooth was on.
+
+Not tested: sending, such as advertising or connecting to a device, and classic
+Bluetooth. Nothing in the system uses Bluetooth yet.
+
+To repeat, with `python3` installed in Alpine. Only the first half of each address is
+printed, to keep nearby devices private:
+
+```powershell
+scripts/bt-test.ps1
+```
 
 ## Power off and charging
 
