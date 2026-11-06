@@ -13,6 +13,7 @@
 
 use crate::alpine;
 use crate::bluetooth;
+use crate::sensors;
 use crate::charging::{self, Event as PowerEvent};
 use crate::dhcp::{self, MessageType};
 use crate::display::Canvas;
@@ -248,6 +249,11 @@ const BLUETOOTH_REPLY_WAIT: Duration = Duration::from_secs(2);
 const BLUETOOTH_RETRY: Duration = Duration::from_secs(30);
 const BLUETOOTH_IDLE_CHECK: Duration = Duration::from_secs(2);
 const BLUETOOTH_LIST_LIMIT: usize = 20;
+// The latest values of each BLE sensor, appended this often while scanning.
+const SENSOR_HISTORY: &str = "/data/a32/sensors.csv";
+const SENSOR_HISTORY_OLD: &str = "/data/a32/sensors.csv.1";
+const SENSOR_HISTORY_LIMIT: u64 = 1024 * 1024;
+const SENSOR_HISTORY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// The BLE scan: whether it is wanted, what it is doing, and what it heard.
 struct BluetoothState {
@@ -573,7 +579,9 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
     let reply = match web::route(&String::from_utf8_lossy(&request)) {
         Route::Page => {
             let tail = web::last_lines(&log_tail(), WEB_LOG_LINES);
-            web::response("200 OK", "text/html; charset=utf-8", &web::page(&snapshot(), &wall_clock_text(), &tail))
+            let sensors = sensor_rows();
+            let body = web::page(&snapshot(), &wall_clock_text(), &sensors, &tail);
+            web::response("200 OK", "text/html; charset=utf-8", &body)
         }
         Route::Json => web::response("200 OK", "application/json", &web::json(&snapshot(), &wall_clock_text())),
         Route::Bluetooth => {
@@ -655,6 +663,8 @@ fn run_bluetooth_scan() -> io::Result<()> {
     log("bluetooth: scanning");
     bluetooth_state().state = "scanning".to_string();
     let mut next_cleanup = since_start() + bluetooth::FORGET_AFTER;
+    let mut last_history = since_start();
+    let mut next_history = last_history + SENSOR_HISTORY_INTERVAL;
     while bluetooth_state().wanted {
         if wait_readable(&device, Some(POLL_INTERVAL))? {
             let length = device.read(&mut buffer)?;
@@ -676,6 +686,13 @@ fn run_bluetooth_scan() -> io::Result<()> {
         if now >= next_cleanup {
             bluetooth_state().devices.forget_old(now);
             next_cleanup = now + bluetooth::FORGET_AFTER;
+        }
+        if now >= next_history {
+            if let Err(err) = save_sensor_history(last_history) {
+                log(&format!("bluetooth: sensor history not saved: {err}"));
+            }
+            last_history = now;
+            next_history = now + SENSOR_HISTORY_INTERVAL;
         }
     }
     // Stopped politely, although closing the device turns the radio off anyway.
@@ -705,7 +722,68 @@ fn bluetooth_report() -> String {
             device.name.as_deref().unwrap_or(""),
         ));
     }
+    let sensors = state.devices.sensors();
+    if !sensors.is_empty() {
+        text.push_str(&format!("\n{} sensors:", sensors.len()));
+        for device in sensors {
+            text.push_str(&format!(
+                "\n{} {}",
+                bluetooth::address_text(&device.address),
+                web::sensor_summary(device, now)
+            ));
+        }
+    }
     text
+}
+
+/// A label and a summary for each sensor, for the status page.
+fn sensor_rows() -> Vec<(String, String)> {
+    let state = bluetooth_state();
+    let now = since_start();
+    state
+        .devices
+        .sensors()
+        .into_iter()
+        .map(|device| {
+            let address = bluetooth::address_text(&device.address);
+            let label = match &device.name {
+                Some(name) => format!("{name} {address}"),
+                None => address,
+            };
+            (label, web::sensor_summary(device, now))
+        })
+        .collect()
+}
+
+/// Appends the latest values of each sensor heard since `since` to the history on
+/// /data. One older file is kept, so this uses at most twice the limit.
+fn save_sensor_history(since: Duration) -> io::Result<()> {
+    if !DATA_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let time = wall_clock_text();
+    let lines: String = bluetooth_state()
+        .devices
+        .sensors()
+        .into_iter()
+        .filter_map(|device| {
+            let (reading, updated) = device.sensor.as_ref()?;
+            (*updated > since)
+                .then(|| sensors::csv_line(&time, &bluetooth::address_text(&device.address), reading))
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(());
+    }
+    if fs::metadata(SENSOR_HISTORY).is_ok_and(|meta| meta.len() >= SENSOR_HISTORY_LIMIT) {
+        fs::rename(SENSOR_HISTORY, SENSOR_HISTORY_OLD)?;
+    }
+    let new = !Path::new(SENSOR_HISTORY).exists();
+    let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(SENSOR_HISTORY)?;
+    if new {
+        file.write_all(sensors::CSV_HEADER.as_bytes())?;
+    }
+    file.write_all(lines.as_bytes())
 }
 
 /// The end of the persistent log, or of this session's log if /data is not mounted.

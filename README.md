@@ -747,6 +747,37 @@ too much that evening to tell.
 The HCI handling is in `src/bluetooth.rs`, with unit tests built from replies read on
 this phone.
 
+### BLE sensors
+
+While the scan runs, temperature, humidity and battery are read from sensors that
+broadcast them without a key, in `src/sensors.rs`:
+
+| Format | Service data | Used by |
+|---|---|---|
+| Xiaomi MiBeacon, unencrypted | `0xFE95` | Older Xiaomi sensors, such as the round LYWSDCGQ |
+| BTHome v2, unencrypted | `0xFCD2` | Shelly BLU and sensors with open firmware |
+| pvvx and ATC1441 | `0x181A` | Xiaomi LYWSD03MMC and similar with custom firmware |
+
+Encrypted MiBeacon, which newer Xiaomi sensors such as the LYWSD03MMC send with stock
+firmware, needs each sensor's key and is skipped. A MiBeacon advertisement carries
+either the climate or the battery, so a sensor's values are merged as they arrive.
+
+Sensors show under `bluetooth` on the console, in a Sensors table on the status page,
+and with a `sensor` object in `/bluetooth.json`. Every 5 minutes the latest values of
+each sensor heard since the last write are appended to `/data/a32/sensors.csv`, which
+moves to `sensors.csv.1` at 1 MiB. Any sensor in range is recorded, including a
+neighbor's, because the advertisements are public.
+
+Test results, from a RAM boot: a survey of nearby advertisements
+(`scripts/bluetooth/ble-kinds.py`) found service data `0xFE95` from one device, and
+`mibeacon-kinds.py`
+showed product `0x01AA`, the LYWSDCGQ, unencrypted, at -83 dBm. The scan then read it
+as 26.00 C and 72.00%, then 25.90 C and 72.10%, and the history file got its header and
+a row after 5 minutes. No battery value arrived in about 6 minutes, because this
+sensor sends it less often. Whether the values match the sensor's display was not
+checked. BTHome, pvvx and ATC1441 are only unit tested, from their published layouts,
+because no such sensor was in range.
+
 To repeat the first test, with `python3` installed in Alpine. Only the first half of each address is
 printed, to keep nearby devices private:
 

@@ -4,6 +4,9 @@
 //! Everything here is text in and bytes out, so it runs on the host in unit tests.
 
 use crate::bluetooth::{address_text, Device};
+use crate::sensors::centi_text;
+#[cfg(test)]
+use crate::sensors::{Format, Reading};
 use crate::ui::Snapshot;
 use std::time::Duration;
 
@@ -66,19 +69,49 @@ fn rows(status: &Snapshot) -> [(&'static str, &'static str, &str); 12] {
     ]
 }
 
+/// A sensor's latest values in words, such as `23.40 C, 45.60%, battery 93%, 5 s ago`.
+pub fn sensor_summary(device: &Device, now: Duration) -> String {
+    let Some((reading, updated)) = &device.sensor else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(value) = reading.temperature_centi {
+        parts.push(format!("{} C", centi_text(value.into())));
+    }
+    if let Some(value) = reading.humidity_centi {
+        parts.push(format!("{}%", centi_text(value.into())));
+    }
+    if let Some(value) = reading.battery_percent {
+        parts.push(format!("battery {value}%"));
+    }
+    parts.push(format!("{} s ago", now.saturating_sub(*updated).as_secs()));
+    parts.join(", ")
+}
+
 /// The devices the BLE scan heard, strongest first, for `/bluetooth.json`.
 pub fn bluetooth_json(state: &str, devices: &[&Device], now: Duration) -> String {
     let items: Vec<String> = devices
         .iter()
         .map(|device| {
             format!(
-                "{{\"address\":\"{}\",\"random\":{},\"name\":{},\"rssi\":{},\"seconds_ago\":{},\"reports\":{}}}",
+                "{{\"address\":\"{}\",\"random\":{},\"name\":{},\"rssi\":{},\"seconds_ago\":{},\"reports\":{},\"sensor\":{}}}",
                 address_text(&device.address),
                 device.random,
                 device.name.as_deref().map_or("null".to_string(), escape_json),
                 device.rssi,
                 now.saturating_sub(device.last_seen).as_secs(),
                 device.reports,
+                device.sensor.as_ref().map_or("null".to_string(), |(reading, updated)| {
+                    let number = |value: Option<String>| value.unwrap_or_else(|| "null".to_string());
+                    format!(
+                        "{{\"format\":\"{}\",\"temperature_c\":{},\"humidity_percent\":{},\"battery_percent\":{},\"seconds_ago\":{}}}",
+                        reading.format.name(),
+                        number(reading.temperature_centi.map(|value| centi_text(value.into()))),
+                        number(reading.humidity_centi.map(|value| centi_text(value.into()))),
+                        number(reading.battery_percent.map(|value| value.to_string())),
+                        now.saturating_sub(*updated).as_secs(),
+                    )
+                }),
             )
         })
         .collect();
@@ -118,11 +151,21 @@ fn escape_json(text: &str) -> String {
     out
 }
 
-/// The status page. `log_tail` is shown as it is, after escaping.
-pub fn page(status: &Snapshot, time: &str, log_tail: &str) -> String {
+/// The status page. `sensors` holds a label and a summary for each BLE sensor, and
+/// the section is left out without any. Everything is shown after escaping.
+pub fn page(status: &Snapshot, time: &str, sensors: &[(String, String)], log_tail: &str) -> String {
     let mut table = String::new();
     for (_, label, value) in rows(status) {
         table.push_str(&format!("<tr><th>{label}</th><td>{}</td></tr>\n", escape_html(value)));
+    }
+    let mut sensor_section = String::new();
+    if !sensors.is_empty() {
+        sensor_section.push_str("<h2>Sensors</h2>\n<table>\n");
+        for (label, summary) in sensors {
+            sensor_section
+                .push_str(&format!("<tr><td>{}</td><td>{}</td></tr>\n", escape_html(label), escape_html(summary)));
+        }
+        sensor_section.push_str("</table>\n");
     }
     format!(
         "<!doctype html>
@@ -153,7 +196,7 @@ pre {{ margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6
 <p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a></p>
 <table>
 {table}</table>
-<h2>Log, newest last</h2>
+{sensor_section}<h2>Log, newest last</h2>
 <pre>{}</pre>
 </main>
 </body>
@@ -216,7 +259,8 @@ mod tests {
 
     #[test]
     fn page_escapes_values_and_the_log() {
-        let html = page(&status(), "2026-11-06T12:00:00Z", "[1.0] <script>alert(1)</script>");
+        let html = page(&status(), "2026-11-06T12:00:00Z", &[], "[1.0] <script>alert(1)</script>");
+        assert!(!html.contains("<h2>Sensors</h2>"));
         assert!(html.contains("Home &lt;&quot;Wi-Fi&quot;&gt; &amp; more"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<script>"));
@@ -255,15 +299,25 @@ mod tests {
             rssi: -65,
             last_seen: Duration::from_secs(90),
             reports: 41,
+            sensor: Some((
+                Reading { format: Format::MiBeacon, temperature_centi: Some(-520), humidity_centi: Some(4560), battery_percent: Some(93) },
+                Duration::from_secs(95),
+            )),
         };
-        let unnamed = Device { address: [1, 2, 3, 4, 5, 6], random: true, name: None, rssi: -80, last_seen: Duration::from_secs(99), reports: 1 };
+        let unnamed = Device { address: [1, 2, 3, 4, 5, 6], random: true, name: None, rssi: -80, last_seen: Duration::from_secs(99), reports: 1, sensor: None };
         let text = bluetooth_json("scanning", &[&named, &unnamed], Duration::from_secs(100));
         assert_eq!(
             text,
             "{\"state\":\"scanning\",\"devices\":[\
-             {\"address\":\"11:22:33:44:55:66\",\"random\":false,\"name\":\"Room \\\"A\\\"\",\"rssi\":-65,\"seconds_ago\":10,\"reports\":41},\
-             {\"address\":\"06:05:04:03:02:01\",\"random\":true,\"name\":null,\"rssi\":-80,\"seconds_ago\":1,\"reports\":1}]}\n"
+             {\"address\":\"11:22:33:44:55:66\",\"random\":false,\"name\":\"Room \\\"A\\\"\",\"rssi\":-65,\"seconds_ago\":10,\"reports\":41,\
+             \"sensor\":{\"format\":\"mibeacon\",\"temperature_c\":-5.20,\"humidity_percent\":45.60,\"battery_percent\":93,\"seconds_ago\":5}},\
+             {\"address\":\"06:05:04:03:02:01\",\"random\":true,\"name\":null,\"rssi\":-80,\"seconds_ago\":1,\"reports\":1,\"sensor\":null}]}\n"
         );
+        assert_eq!(sensor_summary(&named, Duration::from_secs(100)), "-5.20 C, 45.60%, battery 93%, 5 s ago");
+        let rows = [("Room \"A\" 11:22:33:44:55:66".to_string(), sensor_summary(&named, Duration::from_secs(100)))];
+        let html = page(&status(), "now", &rows, "");
+        assert!(html.contains("<h2>Sensors</h2>"));
+        assert!(html.contains("<td>Room &quot;A&quot; 11:22:33:44:55:66</td><td>-5.20 C, 45.60%, battery 93%, 5 s ago</td>"));
         assert_eq!(bluetooth_json("off", &[], Duration::ZERO), "{\"state\":\"off\",\"devices\":[]}\n");
         assert_eq!(route("GET /bluetooth.json HTTP/1.1\r\n\r\n"), Route::Bluetooth);
     }

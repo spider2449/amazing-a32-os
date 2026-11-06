@@ -4,6 +4,7 @@
 //! Packets are H4: a type byte, then an HCI command or event. Nothing here does
 //! I/O, so it runs on the host in unit tests.
 
+use crate::sensors::{self, Reading};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -71,6 +72,7 @@ pub struct Advertisement {
     pub random: bool,
     pub rssi: i8,
     pub name: Option<String>,
+    pub sensor: Option<Reading>,
 }
 
 /// Splits a byte stream into events. Reads from the device can hold part of an
@@ -144,7 +146,13 @@ fn parse_reports(body: &[u8]) -> Vec<Advertisement> {
             break;
         }
         let data = &rest[9..9 + data_length];
-        reports.push(Advertisement { address, random, rssi: rest[9 + data_length] as i8, name: local_name(data) });
+        reports.push(Advertisement {
+            address,
+            random,
+            rssi: rest[9 + data_length] as i8,
+            name: local_name(data),
+            sensor: sensors::parse(data),
+        });
         rest = &rest[10 + data_length..];
     }
     reports
@@ -190,6 +198,9 @@ pub struct Device {
     pub rssi: i8,
     pub last_seen: Duration,
     pub reports: u64,
+    /// The latest values from a sensor, merged across advertisements, and when the
+    /// last one came.
+    pub sensor: Option<(Reading, Duration)>,
 }
 
 /// The devices heard recently.
@@ -220,6 +231,7 @@ impl Devices {
             rssi: advertisement.rssi,
             last_seen: now,
             reports: 0,
+            sensor: None,
         });
         device.rssi = advertisement.rssi;
         device.last_seen = now;
@@ -228,6 +240,22 @@ impl Devices {
         if advertisement.name.is_some() {
             device.name.clone_from(&advertisement.name);
         }
+        if let Some(reading) = &advertisement.sensor {
+            match &mut device.sensor {
+                Some((kept, updated)) => {
+                    kept.merge(reading);
+                    *updated = now;
+                }
+                None => device.sensor = Some((*reading, now)),
+            }
+        }
+    }
+
+    /// The devices that have sent sensor values.
+    pub fn sensors(&self) -> Vec<&Device> {
+        let mut devices: Vec<&Device> = self.by_address.values().filter(|device| device.sensor.is_some()).collect();
+        devices.sort_by_key(|device| device.address);
+        devices
     }
 
     pub fn forget_old(&mut self, now: Duration) {
@@ -255,7 +283,7 @@ mod tests {
     }
 
     fn advertisement(last: u8, rssi: i8, name: Option<&str>) -> Advertisement {
-        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string) }
+        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string), sensor: None }
     }
 
     #[test]
@@ -340,6 +368,25 @@ mod tests {
     }
 
     #[test]
+    fn merges_sensor_frames_from_one_device() {
+        use crate::sensors::Format;
+        let climate = Reading { format: Format::MiBeacon, temperature_centi: Some(2340), humidity_centi: Some(4560), battery_percent: None };
+        let battery = Reading { format: Format::MiBeacon, temperature_centi: None, humidity_centi: None, battery_percent: Some(93) };
+        let mut devices = Devices::default();
+        devices.record(&advertisement(1, -70, None), s(1));
+        assert!(devices.sensors().is_empty());
+        devices.record(&Advertisement { sensor: Some(climate), ..advertisement(1, -70, None) }, s(2));
+        devices.record(&Advertisement { sensor: Some(battery), ..advertisement(1, -71, None) }, s(5));
+        devices.record(&advertisement(1, -72, None), s(6));
+        let sensors = devices.sensors();
+        assert_eq!(sensors.len(), 1);
+        let (reading, updated) = sensors[0].sensor.unwrap();
+        assert_eq!((reading.temperature_centi, reading.humidity_centi, reading.battery_percent), (Some(2340), Some(4560), Some(93)));
+        // Updated by the last sensor frame, not by the plain advertisement after it.
+        assert_eq!(updated, s(5));
+    }
+
+    #[test]
     fn forgets_quiet_devices_and_stays_under_the_limit() {
         let mut devices = Devices::default();
         devices.record(&advertisement(1, -70, None), s(0));
@@ -351,7 +398,7 @@ mod tests {
         for index in 0..DEVICE_LIMIT + 10 {
             let mut address = [0u8; 6];
             address[..2].copy_from_slice(&(index as u16).to_le_bytes());
-            devices.record(&Advertisement { address, random: true, rssi: -90, name: None }, s(index as u64));
+            devices.record(&Advertisement { address, random: true, rssi: -90, name: None, sensor: None }, s(index as u64));
         }
         assert_eq!(devices.list().len(), DEVICE_LIMIT);
         // The first ones heard made room for the last ones.
