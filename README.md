@@ -62,7 +62,26 @@ Then, on the console, after checking the partition's name and size in
 sh mke2fs -t ext4 -L a32data DEVICE
 ```
 
-Power cuts while writing to `/data` have not been tested.
+One power cut was tested, from the phone booted from flash: with 64 MB files being
+rewritten on `/data` and a counter file appended and synced in a loop, USB was
+unplugged and the battery pulled out about 10 seconds later. After the battery went
+back in and the power key started the phone:
+
+- `e2fsck` reported `recovering journal`, then `clean`. `/data` mounted, and the
+  kernel logged no ext4 errors.
+- The saved network was intact: Wi-Fi rejoined it at 32 seconds. SSH started, and
+  `apk audit --system` in Alpine found nothing changed.
+- The counter kept every synced line up to 7, written about 25 seconds before the cut.
+  Under the large writes each `sync` took about 20 seconds, so later lines were not yet
+  on the eMMC, as expected. The persistent log kept a line from about 10 seconds
+  before the cut.
+- The RTC lost the time with the battery out: it restarted at `2010-01-01`, so log lines
+  read 2010 until the network set the clock. The uptime in each line still orders them.
+  This phone's RTC has no backup cell, which may be true of other phones too.
+- `/proc/aed/reboot-reason` read `WDT status: 0` after the power cut, against `2` after
+  software restarts.
+
+This is one cut, so it shows the journal works, not that every cut is harmless.
 
 ## Alpine Linux and SSH
 
@@ -390,7 +409,7 @@ What the kernel offers, read on this phone:
 - `/proc/aed/reboot-reason` starts with a line such as `WDT status: 2 fiq step: 0
   exception type: 0`, which the init logs at start as the previous reset. It read
   `WDT status: 2` after a `reboot bootloader`, so 2 does not mean a watchdog reset.
-  The other values have not been seen.
+  It read `0` after a power cut. The other values have not been seen.
 
 Test results, from RAM boots of images built for each test, restarting into this
 system from the boot partition:
