@@ -13,6 +13,8 @@ param(
     [int]$Runs = 3,
     [int]$LoadSeconds = 0,
     [switch]$Net,
+    # Only the network measurement, for comparing settings that affect Wi-Fi.
+    [switch]$NetOnly,
     [int]$NetPort = 5201,
     [int]$NetSeconds = 10
 )
@@ -78,11 +80,13 @@ try {
 
     for ($run = 1; $run -le $Runs; $run++) {
         [void]$output.Add("# run=$run")
-        [void]$output.Add((Send-Line $serial 'bench cpu' 60))
-        [void]$output.Add((Send-Line $serial 'bench mem' 120))
-        [void]$output.Add((Send-Line $serial "bench disk $DiskPath" 40))
-        if ($WriteFile) { [void]$output.Add((Send-Line $serial "bench write $WriteFile" 60)) }
-        if ($Net) {
+        if (-not $NetOnly) {
+            [void]$output.Add((Send-Line $serial 'bench cpu' 60))
+            [void]$output.Add((Send-Line $serial 'bench mem' 120))
+            [void]$output.Add((Send-Line $serial "bench disk $DiskPath" 40))
+            if ($WriteFile) { [void]$output.Add((Send-Line $serial "bench write $WriteFile" 60)) }
+        }
+        if ($Net -or $NetOnly) {
             $status = Send-Line $serial 'wifi' 5
             $address = [regex]::Match($status, 'ip_address=(\S+)').Groups[1].Value
             if (-not $address) { throw 'the phone has no address, join a network first' }

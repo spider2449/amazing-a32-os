@@ -8,6 +8,8 @@ mod alpine;
 #[cfg(any(target_os = "linux", test))]
 mod bench;
 #[cfg(any(target_os = "linux", test))]
+mod bluetooth;
+#[cfg(any(target_os = "linux", test))]
 mod charging;
 mod probe;
 #[cfg(any(target_os = "linux", test))]

@@ -1,0 +1,12 @@
+# label=bluetooth-idle-on date=2026-11-06T21:32:44
+# Linux version 3.18.35+
+# uptime=357.92
+# run=1
+net.receive bytes=54460416 value=43.3 unit=Mbit/s
+net.send bytes=35323904 value=27.9 unit=Mbit/s
+# run=2
+net.receive bytes=47710208 value=37.8 unit=Mbit/s
+net.send bytes=17760256 value=13.9 unit=Mbit/s
+# run=3
+net.receive bytes=41943040 value=33.2 unit=Mbit/s
+net.send bytes=26869760 value=21.1 unit=Mbit/s

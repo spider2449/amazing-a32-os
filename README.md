@@ -458,7 +458,8 @@ what each returned.
 
 `http://PHONE_ADDRESS/` shows what the panel's home page shows, and the last 40 lines of
 the persistent log. It reloads itself every 15 seconds. `/status.json` has the same
-values for scripts. The page only reads: it takes nothing but the path, so it has no
+values for scripts, and `/bluetooth.json` lists the devices the BLE scan heard, with
+full addresses. The page only reads: it takes nothing but the path, so it has no
 login, and the firewall only lets private addresses reach port 80. It is part of the
 init, with no web server program.
 
@@ -697,9 +698,56 @@ Test results, from a RAM boot with Wi-Fi connected:
 - Wi-Fi stayed connected while Bluetooth was on.
 
 Not tested: sending, such as advertising or connecting to a device, and classic
-Bluetooth. Nothing in the system uses Bluetooth yet.
+Bluetooth.
 
-To repeat, with `python3` installed in Alpine. Only the first half of each address is
+### BLE scan
+
+The init can keep a passive BLE scan running, which never transmits. It is off unless
+chosen, and the choice is kept in `/data/a32/bluetooth` across restarts:
+
+```text
+bluetooth on
+bluetooth
+bluetooth off
+```
+
+`bluetooth` lists the 20 strongest of the devices heard in the last 10 minutes, with
+the address, its type, the signal, when it was last heard and the name if it sends one.
+The list holds at most 256 devices, dropping the one heard from longest ago. The status
+page shows the count, and `/bluetooth.json` the whole list. Nothing is written to
+`/data` about the devices, and the log only records the scan starting and stopping.
+
+Test results, from RAM boots:
+
+- Turned on, the scan heard 10 to 11 devices in the first seconds and 31 to 41 within
+  a minute. Most use random addresses, which change over time. None sent a name: a
+  passive scan only gets names that devices put in their advertisements.
+- After a restart with the choice kept, scanning started at 22.5 seconds, before Wi-Fi
+  joined. `bluetooth off` stopped the scan, turned Bluetooth off in the driver and
+  removed the setting.
+- Reads of 4096 bytes made the driver log `count > BT_BUFFER_SIZE` for each read, so the
+  init reads 1024 bytes at a time. The warning then stopped.
+
+**The scan slows Wi-Fi.** Measured with `scripts/bench.ps1 -NetOnly`, alternating
+on and off, 3 runs each, results in `benchmarks/amazing-a32/bluetooth-*.txt`:
+
+| Scan | Wi-Fi receive with scan on, Mbit/s | Same with Bluetooth off |
+|---|---|---|
+| 30 ms of every 300 ms, round 1 | 35.1 to 36.0 | 42.1 to 44.3 |
+| 30 ms of every 300 ms, round 2 | 26.0 to 32.1 | 39.6 to 40.9 |
+| 30 ms of every 1.28 s, round 1 | 25.8 to 30.7 | 41.4 to 43.3 |
+| 30 ms of every 1.28 s, round 2 | 28.9 to 34.0 | 41.8 to 43.4 |
+
+Receiving was 18 to 32% slower with the scan on, and listening less often did not help,
+so the 300 ms interval, which hears devices more often, was kept. Sending varied too
+much to compare. The two chips share one radio and antenna, which would explain this.
+Whether Bluetooth costs Wi-Fi when on but not scanning was tried once, and Wi-Fi varied
+too much that evening to tell.
+
+The HCI handling is in `src/bluetooth.rs`, with unit tests built from replies read on
+this phone.
+
+To repeat the first test, with `python3` installed in Alpine. Only the first half of each address is
 printed, to keep nearby devices private:
 
 ```powershell

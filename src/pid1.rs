@@ -12,6 +12,7 @@
 //! itself, because the kernel is set to restart 1 second after one.
 
 use crate::alpine;
+use crate::bluetooth;
 use crate::charging::{self, Event as PowerEvent};
 use crate::dhcp::{self, MessageType};
 use crate::display::Canvas;
@@ -238,6 +239,29 @@ const WEB_TIMEOUT: Duration = Duration::from_secs(5);
 const WEB_LOG_LINES: usize = 40;
 // Enough for the lines above, so that a 1 MiB log is not read for each request.
 const WEB_LOG_BYTES: u64 = 16 * 1024;
+// MediaTek's raw Bluetooth device. Opening it powers Bluetooth on, closing it off.
+const BLUETOOTH_DEVICE: &str = "/dev/stpbt";
+// Holds `on` while the scan is wanted. Off unless chosen, because Bluetooth shares
+// the radio with Wi-Fi.
+const BLUETOOTH_SETTING: &str = "/data/a32/bluetooth";
+const BLUETOOTH_REPLY_WAIT: Duration = Duration::from_secs(2);
+const BLUETOOTH_RETRY: Duration = Duration::from_secs(30);
+const BLUETOOTH_IDLE_CHECK: Duration = Duration::from_secs(2);
+const BLUETOOTH_LIST_LIMIT: usize = 20;
+
+/// The BLE scan: whether it is wanted, what it is doing, and what it heard.
+struct BluetoothState {
+    wanted: bool,
+    state: String,
+    devices: bluetooth::Devices,
+}
+
+static BLUETOOTH: Mutex<BluetoothState> =
+    Mutex::new(BluetoothState { wanted: false, state: String::new(), devices: bluetooth::Devices::new() });
+
+fn bluetooth_state() -> MutexGuard<'static, BluetoothState> {
+    BLUETOOTH.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// When this process started. Watchdog times count from here, because the wall
 /// clock jumps when it is set.
@@ -552,11 +576,136 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
             web::response("200 OK", "text/html; charset=utf-8", &web::page(&snapshot(), &wall_clock_text(), &tail))
         }
         Route::Json => web::response("200 OK", "application/json", &web::json(&snapshot(), &wall_clock_text())),
+        Route::Bluetooth => {
+            let state = bluetooth_state();
+            let body = web::bluetooth_json(&state.state, &state.devices.list(), since_start());
+            drop(state);
+            web::response("200 OK", "application/json", &body)
+        }
         Route::NotFound => web::response("404 Not Found", plain, "not found\n"),
         Route::MethodNotAllowed => web::response("405 Method Not Allowed", plain, "only GET\n"),
         Route::BadRequest => web::response("400 Bad Request", plain, "bad request\n"),
     };
     stream.write_all(&reply)
+}
+
+/// Runs the BLE scan while it is wanted. It starts once the Wi-Fi start has made the
+/// device, and a failure is retried, because the chip may still be starting.
+fn bluetooth_service() {
+    let wanted = DATA_READY.load(Ordering::Acquire)
+        && fs::read_to_string(BLUETOOTH_SETTING).is_ok_and(|text| text.trim() == "on");
+    {
+        let mut state = bluetooth_state();
+        state.wanted = wanted;
+        state.state = "off".to_string();
+    }
+    loop {
+        let starting = fs::read_to_string(WIFI_STATE).is_ok_and(|state| state.trim() == "starting");
+        if !bluetooth_state().wanted || starting || !Path::new(BLUETOOTH_DEVICE).exists() {
+            thread::sleep(BLUETOOTH_IDLE_CHECK);
+            continue;
+        }
+        let result = run_bluetooth_scan();
+        let mut state = bluetooth_state();
+        state.devices.clear();
+        match result {
+            Ok(()) => {
+                log("bluetooth: scan stopped");
+                state.state = "off".to_string();
+            }
+            Err(err) => {
+                log(&format!("bluetooth: {err}"));
+                state.state = format!("failed, retrying: {err}");
+                drop(state);
+                thread::sleep(BLUETOOTH_RETRY);
+            }
+        }
+    }
+}
+
+/// Starts a passive scan and records what it hears until the scan is no longer
+/// wanted. Closing the device on return turns Bluetooth off.
+fn run_bluetooth_scan() -> io::Result<()> {
+    let mut device = OpenOptions::new().read(true).write(true).open(BLUETOOTH_DEVICE)?;
+    let mut parser = bluetooth::Parser::default();
+    // The driver warns in the kernel log about any read over its 2048 byte buffer, and
+    // an event is at most 258 bytes.
+    let mut buffer = [0u8; 1024];
+    for (opcode, parameters) in bluetooth::start_scan() {
+        device.write_all(&bluetooth::command(opcode, &parameters))?;
+        let deadline = Instant::now() + BLUETOOTH_REPLY_WAIT;
+        let status = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || !wait_readable(&device, Some(left))? {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("no reply to command {opcode:#06x}")));
+            }
+            let length = device.read(&mut buffer)?;
+            let replied = parser.push(&buffer[..length]).into_iter().find_map(|event| match event {
+                bluetooth::Event::Complete(done, status) if done == opcode => Some(status),
+                _ => None,
+            });
+            if let Some(status) = replied {
+                break status;
+            }
+        };
+        if status != 0 {
+            return Err(io::Error::other(format!("command {opcode:#06x} failed with status {status:#04x}")));
+        }
+    }
+    log("bluetooth: scanning");
+    bluetooth_state().state = "scanning".to_string();
+    let mut next_cleanup = since_start() + bluetooth::FORGET_AFTER;
+    while bluetooth_state().wanted {
+        if wait_readable(&device, Some(POLL_INTERVAL))? {
+            let length = device.read(&mut buffer)?;
+            if length == 0 {
+                return Err(io::Error::other("the device closed"));
+            }
+            let now = since_start();
+            let events = parser.push(&buffer[..length]);
+            let mut state = bluetooth_state();
+            for event in events {
+                if let bluetooth::Event::Advertisements(heard) = event {
+                    for advertisement in &heard {
+                        state.devices.record(advertisement, now);
+                    }
+                }
+            }
+        }
+        let now = since_start();
+        if now >= next_cleanup {
+            bluetooth_state().devices.forget_old(now);
+            next_cleanup = now + bluetooth::FORGET_AFTER;
+        }
+    }
+    // Stopped politely, although closing the device turns the radio off anyway.
+    device.write_all(&bluetooth::command(bluetooth::LE_SET_SCAN_ENABLE, &[0x00, 0x00]))?;
+    Ok(())
+}
+
+/// Describes the scan and the strongest devices, for the console.
+fn bluetooth_report() -> String {
+    let state = bluetooth_state();
+    let now = since_start();
+    let devices = state.devices.list();
+    let mut text = format!(
+        "bluetooth: {}, {}\n{} devices heard in the last {} s",
+        if state.wanted { "on" } else { "off" },
+        state.state,
+        devices.len(),
+        bluetooth::FORGET_AFTER.as_secs()
+    );
+    for device in devices.iter().take(BLUETOOTH_LIST_LIMIT) {
+        text.push_str(&format!(
+            "\n{} {:>4} dBm {:>4} s ago {}{}",
+            bluetooth::address_text(&device.address),
+            device.rssi,
+            now.saturating_sub(device.last_seen).as_secs(),
+            if device.random { "random " } else { "" },
+            device.name.as_deref().unwrap_or(""),
+        ));
+    }
+    text
 }
 
 /// The end of the persistent log, or of this session's log if /data is not mounted.
@@ -851,6 +1000,14 @@ fn snapshot() -> Snapshot {
             format!("{}% {}", read(BATTERY_CAPACITY).trim(), read(BATTERY_STATUS).trim())
         },
         battery_temperature: degrees(BATTERY_ZONE),
+        bluetooth: {
+            let state = bluetooth_state();
+            if state.state == "scanning" {
+                format!("scanning, {} devices heard", state.devices.list().len())
+            } else {
+                state.state.clone()
+            }
+        },
     }
 }
 
@@ -1068,6 +1225,10 @@ fn storage_and_network() {
         return;
     }
     set_wifi_state("starting");
+    // It waits for the Wi-Fi start, which brings up the chip Bluetooth shares.
+    if let Err(err) = thread::Builder::new().spawn(bluetooth_service) {
+        log(&format!("bluetooth: thread failed: {err}"));
+    }
     let start = Instant::now();
     if let Err(err) = start_wifi() {
         set_wifi_state(&format!("failed: {err}"));
@@ -1789,6 +1950,27 @@ impl Platform for KernelPlatform {
 
     fn dhcp(&self, interface: &str) -> io::Result<String> {
         renew_lease(interface)
+    }
+
+    fn bluetooth(&self, switch: Option<bool>) -> io::Result<String> {
+        if let Some(on) = switch {
+            if !DATA_READY.load(Ordering::Acquire) {
+                return Err(io::Error::other("/data is not mounted, so the choice could not be kept"));
+            }
+            if on {
+                write_private_file(BLUETOOTH_SETTING, "on\n")?;
+            } else {
+                match fs::remove_file(BLUETOOTH_SETTING) {
+                    Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+                    _ => File::open(SETTINGS_DIR)?.sync_all()?,
+                }
+            }
+            bluetooth_state().wanted = on;
+            log(&format!("bluetooth: turned {}", if on { "on" } else { "off" }));
+            // The scan starts or stops within a couple of seconds.
+            thread::sleep(BLUETOOTH_IDLE_CHECK + POLL_INTERVAL);
+        }
+        Ok(bluetooth_report())
     }
 
     fn power_off(&self) -> io::Error {

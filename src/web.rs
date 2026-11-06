@@ -3,7 +3,9 @@
 //! nothing, so it needs no login. The firewall only lets private addresses reach it.
 //! Everything here is text in and bytes out, so it runs on the host in unit tests.
 
+use crate::bluetooth::{address_text, Device};
 use crate::ui::Snapshot;
+use std::time::Duration;
 
 pub const PORT: u16 = 80;
 /// The same port, for firewall rules.
@@ -18,6 +20,7 @@ const REFRESH_SECONDS: u32 = 15;
 pub enum Route {
     Page,
     Json,
+    Bluetooth,
     NotFound,
     MethodNotAllowed,
     BadRequest,
@@ -40,12 +43,13 @@ pub fn route(request: &str) -> Route {
     match target.split('?').next().unwrap_or_default() {
         "/" | "/index.html" => Route::Page,
         "/status.json" => Route::Json,
+        "/bluetooth.json" => Route::Bluetooth,
         _ => Route::NotFound,
     }
 }
 
 /// The rows both formats show, as (JSON key, label, value).
-fn rows(status: &Snapshot) -> [(&'static str, &'static str, &str); 11] {
+fn rows(status: &Snapshot) -> [(&'static str, &'static str, &str); 12] {
     [
         ("address", "Address", &status.address),
         ("network", "Network", &status.network),
@@ -58,7 +62,27 @@ fn rows(status: &Snapshot) -> [(&'static str, &'static str, &str); 11] {
         ("disk", "Disk /data", &status.disk),
         ("battery", "Battery", &status.battery),
         ("battery_temperature", "Battery temperature", &status.battery_temperature),
+        ("bluetooth", "Bluetooth", &status.bluetooth),
     ]
+}
+
+/// The devices the BLE scan heard, strongest first, for `/bluetooth.json`.
+pub fn bluetooth_json(state: &str, devices: &[&Device], now: Duration) -> String {
+    let items: Vec<String> = devices
+        .iter()
+        .map(|device| {
+            format!(
+                "{{\"address\":\"{}\",\"random\":{},\"name\":{},\"rssi\":{},\"seconds_ago\":{},\"reports\":{}}}",
+                address_text(&device.address),
+                device.random,
+                device.name.as_deref().map_or("null".to_string(), escape_json),
+                device.rssi,
+                now.saturating_sub(device.last_seen).as_secs(),
+                device.reports,
+            )
+        })
+        .collect();
+    format!("{{\"state\":{},\"devices\":[{}]}}\n", escape_json(state), items.join(","))
 }
 
 fn escape_html(text: &str) -> String {
@@ -126,7 +150,7 @@ pre {{ margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6
 <body>
 <main>
 <h1>Amazing A32</h1>
-<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a></p>
+<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a></p>
 <table>
 {table}</table>
 <h2>Log, newest last</h2>
@@ -220,6 +244,28 @@ mod tests {
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Content-Length: 3\r\n"));
         assert!(text.ends_with("\r\n\r\n°C"));
+    }
+
+    #[test]
+    fn lists_bluetooth_devices_with_escaped_names() {
+        let named = Device {
+            address: [0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
+            random: false,
+            name: Some("Room \"A\"".to_string()),
+            rssi: -65,
+            last_seen: Duration::from_secs(90),
+            reports: 41,
+        };
+        let unnamed = Device { address: [1, 2, 3, 4, 5, 6], random: true, name: None, rssi: -80, last_seen: Duration::from_secs(99), reports: 1 };
+        let text = bluetooth_json("scanning", &[&named, &unnamed], Duration::from_secs(100));
+        assert_eq!(
+            text,
+            "{\"state\":\"scanning\",\"devices\":[\
+             {\"address\":\"11:22:33:44:55:66\",\"random\":false,\"name\":\"Room \\\"A\\\"\",\"rssi\":-65,\"seconds_ago\":10,\"reports\":41},\
+             {\"address\":\"06:05:04:03:02:01\",\"random\":true,\"name\":null,\"rssi\":-80,\"seconds_ago\":1,\"reports\":1}]}\n"
+        );
+        assert_eq!(bluetooth_json("off", &[], Duration::ZERO), "{\"state\":\"off\",\"devices\":[]}\n");
+        assert_eq!(route("GET /bluetooth.json HTTP/1.1\r\n\r\n"), Route::Bluetooth);
     }
 
     #[test]

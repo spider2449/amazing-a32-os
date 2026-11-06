@@ -53,6 +53,8 @@ pub struct Snapshot {
     pub disk: String,
     pub battery: String,
     pub battery_temperature: String,
+    /// Only on the status page, which has room for it.
+    pub bluetooth: String,
 }
 
 /// Work the panel cannot do itself, because it would stop the screen responding.

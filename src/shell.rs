@@ -27,6 +27,8 @@ const HELP: &str = "commands:
                                use double quotes around a value with spaces
   wifi forget                  leave the network and erase its saved details
   tcp HOST:PORT                try a TCP connection
+  bluetooth                    show the BLE scan and the devices heard
+  bluetooth on|off             start or stop the BLE scan, kept for later starts
   bench cpu|mem|disk PATH      measure performance
   bench write NEW_FILE         measure writes to a new file, then remove it
   bench display                measure drawing, with the screen off
@@ -61,6 +63,8 @@ pub trait Platform {
     fn wifi_join(&self, credentials: &Credentials) -> io::Result<String>;
     /// Leaves the network and erases its saved details.
     fn wifi_forget(&self) -> io::Result<String>;
+    /// Turns the BLE scan on or off and keeps that choice, or with `None` describes it.
+    fn bluetooth(&self, switch: Option<bool>) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -123,6 +127,9 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
                 .and_then(|credentials| platform.wifi_join(&credentials))
                 .and_then(|text| writeln!(out, "{text}"))
         }
+        ["bluetooth"] => platform.bluetooth(None).and_then(|text| writeln!(out, "{text}")),
+        ["bluetooth", "on"] => platform.bluetooth(Some(true)).and_then(|text| writeln!(out, "{text}")),
+        ["bluetooth", "off"] => platform.bluetooth(Some(false)).and_then(|text| writeln!(out, "{text}")),
         ["tcp", address] => try_tcp(address, out),
         ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
             (Ok(x), Ok(y)) => platform.tap(x, y),
@@ -234,6 +241,10 @@ mod tests {
             Ok("forgotten".into())
         }
 
+        fn bluetooth(&self, switch: Option<bool>) -> io::Result<String> {
+            Ok(format!("bluetooth {switch:?}"))
+        }
+
         fn dhcp(&self, interface: &str) -> io::Result<String> {
             Ok(format!("lease on {interface}"))
         }
@@ -287,6 +298,14 @@ mod tests {
         assert!(session("wifi join\n").0.contains("error: usage"));
         assert!(session("wifi forget\n").0.contains("forgotten"));
         assert!(session("wifi leave\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn bluetooth_takes_on_or_off() {
+        assert!(session("bluetooth\n").0.contains("bluetooth None"));
+        assert!(session("bluetooth on\n").0.contains("bluetooth Some(true)"));
+        assert!(session("bluetooth off\n").0.contains("bluetooth Some(false)"));
+        assert!(session("bluetooth maybe\n").0.contains("unknown command"));
     }
 
     #[test]

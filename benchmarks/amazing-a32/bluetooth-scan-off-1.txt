@@ -1,0 +1,12 @@
+# label=bluetooth-scan-off-1 date=2026-11-06T21:22:29
+# Linux version 3.18.35+
+# uptime=145.04
+# run=1
+net.receive bytes=54394880 value=43.2 unit=Mbit/s
+net.send bytes=53280768 value=42.2 unit=Mbit/s
+# run=2
+net.receive bytes=55705600 value=44.3 unit=Mbit/s
+net.send bytes=34275328 value=26.9 unit=Mbit/s
+# run=3
+net.receive bytes=53018624 value=42.1 unit=Mbit/s
+net.send bytes=45940736 value=35.5 unit=Mbit/s
