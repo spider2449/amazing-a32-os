@@ -512,7 +512,10 @@ the phone off. Without USB it stays off until the key starts it again.
 
 The screen is a panel, drawn by the init with no other graphics software. The home page
 shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
-power off the phone, and scan for and join a WPA2 network with an on-screen keyboard.
+power off the phone, scan for and join a WPA2 network with an on-screen keyboard, and turn
+the BLE scan on or off. The Bluetooth page shows the scan's state, up to 4 sensors with their
+values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
+because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
 in a different place, so a double tap cannot confirm by accident.
 
@@ -526,6 +529,12 @@ the network.
 The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
 enterprise networks are not listed, because this system cannot join them. Text is ASCII, so
 other characters in an SSID show as `?`, but such a network can still be joined.
+
+The Bluetooth page was checked on a RAM boot with a screenshot, showing the scan, the
+LYWSDCGQ at 26.00 C and 72.20%, and the strongest devices. Its OFF and ON buttons each
+worked once, pressed while someone used the panel by hand at the same time. A screenshot
+takes about 7 seconds while the panel redraws each second, so it can mix rows from two
+frames: one showed a device twice, while `/bluetooth.json` had no repeated address.
 
 Touch coordinates match the 480x854 display without calibration: the top left corner read
 `4,4` and the bottom right `476,850`.

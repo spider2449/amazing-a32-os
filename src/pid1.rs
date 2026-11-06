@@ -249,6 +249,8 @@ const BLUETOOTH_REPLY_WAIT: Duration = Duration::from_secs(2);
 const BLUETOOTH_RETRY: Duration = Duration::from_secs(30);
 const BLUETOOTH_IDLE_CHECK: Duration = Duration::from_secs(2);
 const BLUETOOTH_LIST_LIMIT: usize = 20;
+// As many as the panel's Bluetooth page has rows for.
+const BLUETOOTH_PANEL_NEARBY: usize = 6;
 // The latest values of each BLE sensor, appended this often while scanning.
 const SENSOR_HISTORY: &str = "/data/a32/sensors.csv";
 const SENSOR_HISTORY_OLD: &str = "/data/a32/sensors.csv.1";
@@ -1086,7 +1088,47 @@ fn snapshot() -> Snapshot {
                 state.state.clone()
             }
         },
+        bluetooth_sensors: panel_sensor_lines(),
+        bluetooth_nearby: {
+            let state = bluetooth_state();
+            state
+                .devices
+                .list()
+                .iter()
+                .take(BLUETOOTH_PANEL_NEARBY)
+                .map(|device| format!("{}  {} dBm", bluetooth::address_text(&device.address), device.rssi))
+                .collect()
+        },
     }
+}
+
+/// For each sensor, a label line with the name or address, the battery and the age,
+/// and a values line with the temperature and humidity. Short enough for the panel.
+fn panel_sensor_lines() -> Vec<(String, String)> {
+    let state = bluetooth_state();
+    let now = since_start();
+    state
+        .devices
+        .sensors()
+        .into_iter()
+        .filter_map(|device| {
+            let (reading, updated) = device.sensor.as_ref()?;
+            let mut label =
+                device.name.clone().unwrap_or_else(|| bluetooth::address_text(&device.address));
+            if let Some(battery) = reading.battery_percent {
+                label.push_str(&format!("  BAT {battery}%"));
+            }
+            label.push_str(&format!("  {} s", now.saturating_sub(*updated).as_secs()));
+            let mut values = Vec::new();
+            if let Some(value) = reading.temperature_centi {
+                values.push(format!("{} C", sensors::centi_text(value.into())));
+            }
+            if let Some(value) = reading.humidity_centi {
+                values.push(format!("{}%", sensors::centi_text(value.into())));
+            }
+            Some((label, values.join("  ")))
+        })
+        .collect()
 }
 
 /// Describes the free space on /data.
@@ -1138,6 +1180,10 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                     say(format!("Joined: {}", address.unwrap_or_default()));
                 }
                 Err(err) => say(format!("Not joined: {err}")),
+            },
+            Request::Bluetooth(on) => match KernelPlatform.bluetooth(Some(on)) {
+                Ok(report) => say(report.lines().next().unwrap_or_default().to_string()),
+                Err(err) => say(format!("Bluetooth failed: {err}")),
             },
             Request::Forget => match KernelPlatform.wifi_forget() {
                 Ok(_) => say("Network forgotten".to_string()),

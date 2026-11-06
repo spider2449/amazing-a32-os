@@ -53,8 +53,12 @@ pub struct Snapshot {
     pub disk: String,
     pub battery: String,
     pub battery_temperature: String,
-    /// Only on the status page, which has room for it.
+    /// The scan's state in words, on the status page and the Bluetooth page.
     pub bluetooth: String,
+    /// For the Bluetooth page: a label line and a values line for each sensor, and
+    /// one line for each of the strongest devices.
+    pub bluetooth_sensors: Vec<(String, String)>,
+    pub bluetooth_nearby: Vec<String>,
 }
 
 /// Work the panel cannot do itself, because it would stop the screen responding.
@@ -64,6 +68,8 @@ pub enum Request {
     Scan,
     Join(Credentials),
     Forget,
+    /// Turns the BLE scan on or off, and keeps that choice.
+    Bluetooth(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -94,6 +100,7 @@ enum Page {
     ConfirmForget,
     Networks,
     Keyboard,
+    Bluetooth,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -117,6 +124,9 @@ enum Press {
     ToggleShow,
     Join,
     CancelKeyboard,
+    OpenBluetooth,
+    BluetoothOn,
+    BluetoothOff,
 }
 
 struct Button {
@@ -253,6 +263,15 @@ impl Ui {
                 return Some(Request::Scan);
             }
             Press::OpenPower => self.page = Page::Power,
+            Press::OpenBluetooth => self.page = Page::Bluetooth,
+            Press::BluetoothOn => {
+                self.message = "Turning on...".to_string();
+                return Some(Request::Bluetooth(true));
+            }
+            Press::BluetoothOff => {
+                self.message = "Turning off...".to_string();
+                return Some(Request::Bluetooth(false));
+            }
             Press::Home => self.page = Page::Home,
             Press::AskRestart => self.page = Page::ConfirmRestart,
             Press::AskPowerOff => self.page = Page::ConfirmPowerOff,
@@ -330,8 +349,9 @@ impl Ui {
     fn buttons(&self) -> Vec<Button> {
         match self.page {
             Page::Home => vec![
-                Button::new(split(BOTTOM_ROW, 2, 0), "WI-FI", Press::OpenNetworks),
-                Button::new(split(BOTTOM_ROW, 2, 1), "POWER", Press::OpenPower),
+                Button::new(split(BOTTOM_ROW, 3, 0), "WI-FI", Press::OpenNetworks),
+                Button::new(split(BOTTOM_ROW, 3, 1), "BLUETOOTH", Press::OpenBluetooth),
+                Button::new(split(BOTTOM_ROW, 3, 2), "POWER", Press::OpenPower),
             ],
             Page::Power => vec![
                 Button::new(FIRST_ACTION, "RESTART", Press::AskRestart),
@@ -378,6 +398,11 @@ impl Ui {
                 buttons
             }
             Page::Keyboard => self.keyboard_buttons(),
+            Page::Bluetooth => vec![
+                Button::new(split(BOTTOM_ROW, 3, 0), "ON", Press::BluetoothOn),
+                Button::new(split(BOTTOM_ROW, 3, 1), "OFF", Press::BluetoothOff),
+                Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home),
+            ],
         }
     }
 
@@ -470,6 +495,7 @@ impl Ui {
             }
             Page::Networks => title(canvas, "WI-FI"),
             Page::Keyboard => self.render_keyboard_top(canvas),
+            Page::Bluetooth => render_bluetooth(canvas, status),
         }
         for button in self.buttons() {
             let color = if self.pressed == Some(button.press) { PRESSED } else { button.color };
@@ -539,6 +565,34 @@ impl Ui {
             let y = 170 + index as u32 * (CHAR_HEIGHT * TEXT_MEDIUM + 18);
             canvas.draw_text(MARGIN * 2, y, TEXT_MEDIUM, &line, FOREGROUND);
         }
+    }
+}
+
+/// The scan's state, the sensors, then the strongest devices, as many as fit.
+fn render_bluetooth(canvas: &mut Canvas, status: &Snapshot) {
+    const SENSOR_ROWS: usize = 4;
+    const NEARBY_TOP: u32 = 500;
+    const NEARBY_STEP: u32 = 34;
+    title(canvas, "BLUETOOTH");
+    let state = if status.bluetooth.is_empty() { "off" } else { status.bluetooth.as_str() };
+    canvas.draw_text(MARGIN, 110, TEXT_SMALL, state, FOREGROUND);
+    canvas.draw_text(MARGIN, 136, TEXT_SMALL, "Scanning slows Wi-Fi.", MUTED);
+
+    canvas.fill(Rect { x: 0, y: 170, width: WIDTH, height: 310 }, PANEL);
+    canvas.draw_text(MARGIN, 182, TEXT_SMALL, "SENSORS", ACCENT);
+    if status.bluetooth_sensors.is_empty() {
+        canvas.draw_text(MARGIN, 220, TEXT_SMALL, "None heard.", MUTED);
+    }
+    for (index, (label, values)) in status.bluetooth_sensors.iter().take(SENSOR_ROWS).enumerate() {
+        let y = 214 + index as u32 * 66;
+        canvas.draw_text(MARGIN, y, TEXT_SMALL, label, MUTED);
+        canvas.draw_text(MARGIN, y + 24, TEXT_MEDIUM, values, FOREGROUND);
+    }
+
+    canvas.draw_text(MARGIN, NEARBY_TOP, TEXT_SMALL, "STRONGEST", ACCENT);
+    let rows = ((BOTTOM_ROW.y - NEARBY_TOP - 40) / NEARBY_STEP) as usize;
+    for (index, line) in status.bluetooth_nearby.iter().take(rows).enumerate() {
+        canvas.draw_text(MARGIN, NEARBY_TOP + 34 + index as u32 * NEARBY_STEP, TEXT_SMALL, line, FOREGROUND);
     }
 }
 
@@ -703,7 +757,11 @@ mod tests {
         assert_eq!(ui.press_at((4, (NETWORK_ROW_TOP + 5) as i32)), None);
 
         let ui = Ui::default();
-        assert_eq!(ui.press_at((240, (BOTTOM_ROW.y + 5) as i32)), None);
+        for index in 0..2 {
+            let left = split(BOTTOM_ROW, 3, index);
+            let gap = left.x + left.width + BUTTON_GAP / 2;
+            assert_eq!(ui.press_at((gap as i32, (BOTTOM_ROW.y + 5) as i32)), None);
+        }
         assert_eq!(ui.press_at((4, (BOTTOM_ROW.y + 5) as i32)), None);
     }
 
@@ -790,6 +848,7 @@ mod tests {
             (Page::ConfirmPowerOff, Layer::Lower),
             (Page::ConfirmForget, Layer::Lower),
             (Page::Networks, Layer::Lower),
+            (Page::Bluetooth, Layer::Lower),
         ];
         pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
         for (page, layer) in pages {
@@ -822,10 +881,33 @@ mod tests {
             Page::ConfirmForget,
             Page::Networks,
             Page::Keyboard,
+            Page::Bluetooth,
         ] {
             ui.page = page;
             ui.typed = "x".repeat(PASSPHRASE_LIMIT);
             ui.render(&mut canvas, &status);
         }
+        // A full Bluetooth page, with more rows than fit and over long lines.
+        let status = Snapshot {
+            bluetooth: "scanning, 256 devices heard".to_string(),
+            bluetooth_sensors: (0..9).map(|index| (format!("sensor {index} with a very long name indeed"), "-25.90 C  100.00%".to_string())).collect(),
+            bluetooth_nearby: (0..40).map(|index| format!("aa:bb:cc:dd:ee:{index:02x}  -60 dBm random")).collect(),
+            ..Snapshot::default()
+        };
+        ui.page = Page::Bluetooth;
+        ui.render(&mut canvas, &status);
+    }
+
+    #[test]
+    fn bluetooth_page_turns_the_scan_on_and_off() {
+        let mut ui = Ui::default();
+        assert!(tap_button(&mut ui, Press::OpenBluetooth).is_none());
+        assert_eq!(ui.page, Page::Bluetooth);
+        assert!(matches!(tap_button(&mut ui, Press::BluetoothOn), Some(Request::Bluetooth(true))));
+        assert_eq!(ui.message, "Turning on...");
+        assert!(matches!(tap_button(&mut ui, Press::BluetoothOff), Some(Request::Bluetooth(false))));
+        assert_eq!(ui.page, Page::Bluetooth);
+        assert!(tap_button(&mut ui, Press::Home).is_none());
+        assert_eq!(ui.page, Page::Home);
     }
 }
