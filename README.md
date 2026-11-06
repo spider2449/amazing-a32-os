@@ -545,11 +545,12 @@ Test results, all from RAM boots restarted through fastboot with USB attached:
   flash: the connection was lost at 284 s and back at 404 s with no restart. The first
   lease then came from `192.168.0.254` and gave `192.168.0.188`, a different network
   from the usual `192.168.1.1`. 10 seconds later the connection dropped and came back
-  with the usual address, and 8.8.8.8 answered. Neither `wpa_supplicant` nor the kernel
-  log kept which access point gave the other lease. The router handing out a temporary
-  address while starting, or another access point with the same name and passphrase,
-  would explain it, but this is not known. Each new connection got a new lease, which
-  is what made the phone follow the change.
+  with the usual address, and 8.8.8.8 answered. The access point is a TP-Link in bridge
+  mode, and its owner believes its old router settings served that lease while it was
+  starting. That fits, but neither `wpa_supplicant` nor the kernel log kept which
+  access point gave it. Each new connection got a new lease, which is what made the
+  phone follow the change. Access points that serve their own DHCP while starting may
+  do the same to other devices.
 - A wrong passphrase left the saved file unchanged, and was not found in `/run`,
   `/data` or the kernel log. After `wifi forget` a restart stayed off the network.
 - A name resolved and TCP connected to it. The clock read within about 2 seconds of
