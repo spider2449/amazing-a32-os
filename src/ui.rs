@@ -33,6 +33,12 @@ const KEY_TOP: u32 = 440;
 const KEY_HEIGHT: u32 = 80;
 
 const PASSPHRASE_LIMIT: usize = 63;
+const SENSOR_ROWS: usize = 4;
+const SENSOR_ROW_TOP: u32 = 200;
+const SENSOR_ROW_STEP: u32 = 72;
+const SENSOR_ROW_HEIGHT: u32 = 58;
+// Below every sensor row, so that a double tap on a row cannot confirm removing it.
+const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
 
 const LOWER: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const UPPER: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
@@ -55,10 +61,18 @@ pub struct Snapshot {
     pub battery_temperature: String,
     /// The scan's state in words, on the status page and the Bluetooth page.
     pub bluetooth: String,
-    /// For the Bluetooth page: a label line and a values line for each sensor, and
-    /// one line for each of the strongest devices.
-    pub bluetooth_sensors: Vec<(String, String)>,
+    /// For the Bluetooth pages: the saved sensors, the sensors heard but not saved,
+    /// and one line for each of the strongest devices.
+    pub bluetooth_saved: Vec<SensorRow>,
+    pub bluetooth_candidates: Vec<SensorRow>,
     pub bluetooth_nearby: Vec<String>,
+}
+
+/// A sensor as one row of the panel: its address, and the text to show.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SensorRow {
+    pub address: String,
+    pub line: String,
 }
 
 /// Work the panel cannot do itself, because it would stop the screen responding.
@@ -70,6 +84,9 @@ pub enum Request {
     Forget,
     /// Turns the BLE scan on or off, and keeps that choice.
     Bluetooth(bool),
+    /// Saves or removes a sensor, by its address as text.
+    AddSensor(String),
+    RemoveSensor(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -101,6 +118,8 @@ enum Page {
     Networks,
     Keyboard,
     Bluetooth,
+    AddSensor,
+    ConfirmRemoveSensor,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -127,6 +146,10 @@ enum Press {
     OpenBluetooth,
     BluetoothOn,
     BluetoothOff,
+    OpenAddSensor,
+    PickSaved(usize),
+    PickCandidate(usize),
+    RemoveSensor,
 }
 
 struct Button {
@@ -172,6 +195,11 @@ pub struct Ui {
     typed: String,
     show_typed: bool,
     layer: Layer,
+    /// The sensor lists as last drawn, so that a tap picks what was on the screen.
+    saved: Vec<SensorRow>,
+    candidates: Vec<SensorRow>,
+    /// The address of the sensor being removed.
+    sensor_target: Option<String>,
 }
 
 impl Default for Ui {
@@ -187,6 +215,9 @@ impl Default for Ui {
             typed: String::new(),
             show_typed: false,
             layer: Layer::Lower,
+            saved: Vec::new(),
+            candidates: Vec::new(),
+            sensor_target: None,
         }
     }
 }
@@ -194,6 +225,12 @@ impl Default for Ui {
 impl Ui {
     pub fn set_networks(&mut self, networks: Vec<Network>) {
         self.networks = networks;
+    }
+
+    /// Takes the sensor lists that the next drawing will show.
+    pub fn set_sensors(&mut self, saved: Vec<SensorRow>, candidates: Vec<SensorRow>) {
+        self.saved = saved;
+        self.candidates = candidates;
     }
 
     pub fn set_message(&mut self, message: String) {
@@ -206,6 +243,7 @@ impl Ui {
         self.page = Page::Home;
         self.pressed = None;
         self.finger_down = false;
+        self.sensor_target = None;
         self.clear_typed();
     }
 
@@ -271,6 +309,27 @@ impl Ui {
             Press::BluetoothOff => {
                 self.message = "Turning off...".to_string();
                 return Some(Request::Bluetooth(false));
+            }
+            Press::OpenAddSensor => self.page = Page::AddSensor,
+            Press::PickCandidate(index) => {
+                if let Some(row) = self.candidates.get(index) {
+                    self.page = Page::Bluetooth;
+                    self.message = "Adding...".to_string();
+                    return Some(Request::AddSensor(row.address.clone()));
+                }
+            }
+            Press::PickSaved(index) => {
+                if let Some(row) = self.saved.get(index) {
+                    self.sensor_target = Some(row.address.clone());
+                    self.page = Page::ConfirmRemoveSensor;
+                }
+            }
+            Press::RemoveSensor => {
+                self.page = Page::Bluetooth;
+                if let Some(address) = self.sensor_target.take() {
+                    self.message = "Removing...".to_string();
+                    return Some(Request::RemoveSensor(address));
+                }
             }
             Press::Home => self.page = Page::Home,
             Press::AskRestart => self.page = Page::ConfirmRestart,
@@ -398,10 +457,54 @@ impl Ui {
                 buttons
             }
             Page::Keyboard => self.keyboard_buttons(),
-            Page::Bluetooth => vec![
-                Button::new(split(BOTTOM_ROW, 3, 0), "ON", Press::BluetoothOn),
-                Button::new(split(BOTTOM_ROW, 3, 1), "OFF", Press::BluetoothOff),
-                Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home),
+            Page::Bluetooth => {
+                let mut buttons: Vec<Button> = self
+                    .saved
+                    .iter()
+                    .take(SENSOR_ROWS)
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let area = Rect {
+                            x: MARGIN,
+                            y: SENSOR_ROW_TOP + index as u32 * SENSOR_ROW_STEP,
+                            width: WIDTH - MARGIN * 2,
+                            height: SENSOR_ROW_HEIGHT,
+                        };
+                        let mut button = Button::new(area, &row.line, Press::PickSaved(index));
+                        button.scale = TEXT_SMALL;
+                        button
+                    })
+                    .collect();
+                buttons.push(Button::new(split(BOTTOM_ROW, 4, 0), "ON", Press::BluetoothOn));
+                buttons.push(Button::new(split(BOTTOM_ROW, 4, 1), "OFF", Press::BluetoothOff));
+                buttons.push(Button::new(split(BOTTOM_ROW, 4, 2), "ADD", Press::OpenAddSensor));
+                buttons.push(Button::new(split(BOTTOM_ROW, 4, 3), "BACK", Press::Home));
+                buttons
+            }
+            Page::AddSensor => {
+                let mut buttons: Vec<Button> = self
+                    .candidates
+                    .iter()
+                    .take(NETWORK_ROWS)
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let area = Rect {
+                            x: MARGIN,
+                            y: NETWORK_ROW_TOP + index as u32 * NETWORK_ROW_STEP,
+                            width: WIDTH - MARGIN * 2,
+                            height: NETWORK_ROW_HEIGHT,
+                        };
+                        let mut button = Button::new(area, &row.line, Press::PickCandidate(index));
+                        button.scale = TEXT_SMALL;
+                        button
+                    })
+                    .collect();
+                buttons.push(Button::new(BOTTOM_ROW, "BACK", Press::OpenBluetooth));
+                buttons
+            }
+            Page::ConfirmRemoveSensor => vec![
+                Button::new(REMOVE_ACTION, "YES, REMOVE", Press::RemoveSensor).danger(),
+                Button::new(BOTTOM_ROW, "CANCEL", Press::OpenBluetooth),
             ],
         }
     }
@@ -495,7 +598,21 @@ impl Ui {
             }
             Page::Networks => title(canvas, "WI-FI"),
             Page::Keyboard => self.render_keyboard_top(canvas),
-            Page::Bluetooth => render_bluetooth(canvas, status),
+            Page::Bluetooth => render_bluetooth(canvas, status, self.saved.is_empty()),
+            Page::AddSensor => {
+                title(canvas, "ADD SENSOR");
+                if self.candidates.is_empty() {
+                    canvas.draw_text(MARGIN, 120, TEXT_SMALL, "No new sensors heard.", FOREGROUND);
+                    canvas.draw_text(MARGIN, 150, TEXT_SMALL, "Turn the scan on and wait.", MUTED);
+                }
+            }
+            Page::ConfirmRemoveSensor => {
+                title(canvas, "REMOVE SENSOR?");
+                let address = self.sensor_target.as_deref().unwrap_or_default();
+                canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, address, FOREGROUND);
+                canvas.draw_text(MARGIN, 260, TEXT_MEDIUM, "It is no longer shown", FOREGROUND);
+                canvas.draw_text(MARGIN, 300, TEXT_MEDIUM, "or recorded.", FOREGROUND);
+            }
         }
         for button in self.buttons() {
             let color = if self.pressed == Some(button.press) { PRESSED } else { button.color };
@@ -568,9 +685,9 @@ impl Ui {
     }
 }
 
-/// The scan's state, the sensors, then the strongest devices, as many as fit.
-fn render_bluetooth(canvas: &mut Canvas, status: &Snapshot) {
-    const SENSOR_ROWS: usize = 4;
+/// The scan's state and the strongest devices, as many as fit. The saved sensors
+/// are buttons, drawn with the other buttons.
+fn render_bluetooth(canvas: &mut Canvas, status: &Snapshot, none_saved: bool) {
     const NEARBY_TOP: u32 = 500;
     const NEARBY_STEP: u32 = 34;
     title(canvas, "BLUETOOTH");
@@ -578,15 +695,9 @@ fn render_bluetooth(canvas: &mut Canvas, status: &Snapshot) {
     canvas.draw_text(MARGIN, 110, TEXT_SMALL, state, FOREGROUND);
     canvas.draw_text(MARGIN, 136, TEXT_SMALL, "Scanning slows Wi-Fi.", MUTED);
 
-    canvas.fill(Rect { x: 0, y: 170, width: WIDTH, height: 310 }, PANEL);
-    canvas.draw_text(MARGIN, 182, TEXT_SMALL, "SENSORS", ACCENT);
-    if status.bluetooth_sensors.is_empty() {
-        canvas.draw_text(MARGIN, 220, TEXT_SMALL, "None heard.", MUTED);
-    }
-    for (index, (label, values)) in status.bluetooth_sensors.iter().take(SENSOR_ROWS).enumerate() {
-        let y = 214 + index as u32 * 66;
-        canvas.draw_text(MARGIN, y, TEXT_SMALL, label, MUTED);
-        canvas.draw_text(MARGIN, y + 24, TEXT_MEDIUM, values, FOREGROUND);
+    canvas.draw_text(MARGIN, 172, TEXT_SMALL, "MY SENSORS, TAP ONE TO REMOVE", ACCENT);
+    if none_saved {
+        canvas.draw_text(MARGIN, 214, TEXT_SMALL, "None saved. Press ADD.", MUTED);
     }
 
     canvas.draw_text(MARGIN, NEARBY_TOP, TEXT_SMALL, "STRONGEST", ACCENT);
@@ -840,6 +951,7 @@ mod tests {
     fn buttons_stay_on_the_screen_and_do_not_overlap() {
         let mut ui = Ui::default();
         ui.set_networks((0..12).map(|index| network(&format!("network {index}"))).collect());
+        ui.set_sensors(rows(9), rows(12));
         let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols, Layer::MoreSymbols];
         let mut pages = vec![
             (Page::Home, Layer::Lower),
@@ -849,6 +961,8 @@ mod tests {
             (Page::ConfirmForget, Layer::Lower),
             (Page::Networks, Layer::Lower),
             (Page::Bluetooth, Layer::Lower),
+            (Page::AddSensor, Layer::Lower),
+            (Page::ConfirmRemoveSensor, Layer::Lower),
         ];
         pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
         for (page, layer) in pages {
@@ -882,20 +996,79 @@ mod tests {
             Page::Networks,
             Page::Keyboard,
             Page::Bluetooth,
+            Page::AddSensor,
+            Page::ConfirmRemoveSensor,
         ] {
             ui.page = page;
             ui.typed = "x".repeat(PASSPHRASE_LIMIT);
             ui.render(&mut canvas, &status);
         }
-        // A full Bluetooth page, with more rows than fit and over long lines.
+        // Full Bluetooth pages, with more rows than fit and over long lines.
         let status = Snapshot {
             bluetooth: "scanning, 256 devices heard".to_string(),
-            bluetooth_sensors: (0..9).map(|index| (format!("sensor {index} with a very long name indeed"), "-25.90 C  100.00%".to_string())).collect(),
             bluetooth_nearby: (0..40).map(|index| format!("aa:bb:cc:dd:ee:{index:02x}  -60 dBm random")).collect(),
             ..Snapshot::default()
         };
-        ui.page = Page::Bluetooth;
-        ui.render(&mut canvas, &status);
+        ui.set_sensors(rows(9), rows(12));
+        ui.sensor_target = Some("aa:bb:cc:dd:ee:ff".to_string());
+        for page in [Page::Bluetooth, Page::AddSensor, Page::ConfirmRemoveSensor] {
+            ui.page = page;
+            ui.render(&mut canvas, &status);
+        }
+    }
+
+    fn rows(count: usize) -> Vec<SensorRow> {
+        (0..count)
+            .map(|index| SensorRow {
+                address: format!("aa:bb:cc:dd:ee:{index:02x}"),
+                line: format!("aa:bb:cc:dd:ee:{index:02x} -25.9C 100.0% B100% and more"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sensors_are_added_from_what_was_heard() {
+        let mut ui = Ui { page: Page::Bluetooth, ..Ui::default() };
+        ui.set_sensors(vec![], rows(3));
+        assert!(tap_button(&mut ui, Press::OpenAddSensor).is_none());
+        assert_eq!(ui.page, Page::AddSensor);
+        match tap_button(&mut ui, Press::PickCandidate(1)) {
+            Some(Request::AddSensor(address)) => assert_eq!(address, "aa:bb:cc:dd:ee:01"),
+            _ => panic!("expected an add request"),
+        }
+        assert_eq!(ui.page, Page::Bluetooth);
+        assert_eq!(ui.message, "Adding...");
+        // A list that shrank since it was drawn picks nothing.
+        ui.page = Page::AddSensor;
+        ui.set_sensors(vec![], rows(1));
+        assert!(ui.act(Press::PickCandidate(2)).is_none());
+        assert_eq!(ui.page, Page::AddSensor);
+    }
+
+    #[test]
+    fn removing_a_sensor_needs_a_second_step() {
+        let mut ui = Ui { page: Page::Bluetooth, ..Ui::default() };
+        ui.set_sensors(rows(2), vec![]);
+        assert!(tap_button(&mut ui, Press::PickSaved(1)).is_none());
+        assert_eq!(ui.page, Page::ConfirmRemoveSensor);
+        assert!(tap_button(&mut ui, Press::OpenBluetooth).is_none());
+        assert_eq!(ui.page, Page::Bluetooth);
+        tap_button(&mut ui, Press::PickSaved(0));
+        match tap_button(&mut ui, Press::RemoveSensor) {
+            Some(Request::RemoveSensor(address)) => assert_eq!(address, "aa:bb:cc:dd:ee:00"),
+            _ => panic!("expected a remove request"),
+        }
+        assert_eq!(ui.page, Page::Bluetooth);
+        assert_eq!(ui.sensor_target, None);
+    }
+
+    #[test]
+    fn the_remove_button_is_not_under_a_sensor_row() {
+        let mut ui = Ui { page: Page::Bluetooth, ..Ui::default() };
+        ui.set_sensors(rows(SENSOR_ROWS), vec![]);
+        let rows: Vec<Rect> = ui.buttons().iter().filter(|button| matches!(button.press, Press::PickSaved(_))).map(|button| button.area).collect();
+        assert_eq!(rows.len(), SENSOR_ROWS);
+        assert!(rows.iter().all(|row| !row.overlaps(REMOVE_ACTION)), "a double tap on a row must not confirm");
     }
 
     #[test]

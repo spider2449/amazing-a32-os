@@ -185,6 +185,23 @@ pub fn local_name(mut data: &[u8]) -> Option<String> {
     shortened
 }
 
+/// Reads an address written the usual way, such as `58:2D:34:36:74:93`, into the
+/// order it has on the air, least significant byte first.
+pub fn parse_address(text: &str) -> Option<[u8; 6]> {
+    let parts: Vec<&str> = text.trim().split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut address = [0u8; 6];
+    for (index, part) in parts.iter().enumerate() {
+        if part.len() != 2 {
+            return None;
+        }
+        address[5 - index] = u8::from_str_radix(part, 16).ok()?;
+    }
+    Some(address)
+}
+
 /// Formats an address the usual way, most significant byte first.
 pub fn address_text(address: &[u8; 6]) -> String {
     address.iter().rev().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":")
@@ -365,6 +382,17 @@ mod tests {
         assert_eq!(list[1].rssi, -60);
         assert_eq!(list[1].reports, 2);
         assert_eq!(list[1].last_seen, s(2));
+    }
+
+    #[test]
+    fn parses_addresses_both_ways() {
+        let address = parse_address("58:2D:34:36:74:93").unwrap();
+        assert_eq!(address, [0x93, 0x74, 0x36, 0x34, 0x2d, 0x58]);
+        assert_eq!(address_text(&address), "58:2d:34:36:74:93");
+        assert_eq!(parse_address(" 58:2d:34:36:74:93\n"), Some(address));
+        for bad in ["", "58:2d:34:36:74", "58:2d:34:36:74:93:00", "58:2d:34:36:74:9", "58:2d:34:36:74:zz", "582d:34:36:74:93:00"] {
+            assert_eq!(parse_address(bad), None, "{bad}");
+        }
     }
 
     #[test]

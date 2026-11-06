@@ -22,7 +22,7 @@ use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
-use crate::ui::{Request, Snapshot, Ui};
+use crate::ui::{Request, SensorRow, Snapshot, Ui};
 use crate::usb;
 use crate::watchdog::{self, NetworkWatch, Service};
 use crate::web::{self, Route};
@@ -256,16 +256,24 @@ const SENSOR_HISTORY: &str = "/data/a32/sensors.csv";
 const SENSOR_HISTORY_OLD: &str = "/data/a32/sensors.csv.1";
 const SENSOR_HISTORY_LIMIT: u64 = 1024 * 1024;
 const SENSOR_HISTORY_INTERVAL: Duration = Duration::from_secs(300);
+// The saved sensors, one address per line.
+const SAVED_SENSORS: &str = "/data/a32/bluetooth-sensors";
 
 /// The BLE scan: whether it is wanted, what it is doing, and what it heard.
 struct BluetoothState {
     wanted: bool,
     state: String,
     devices: bluetooth::Devices,
+    /// The sensors chosen to show and record.
+    saved: sensors::Saved,
 }
 
-static BLUETOOTH: Mutex<BluetoothState> =
-    Mutex::new(BluetoothState { wanted: false, state: String::new(), devices: bluetooth::Devices::new() });
+static BLUETOOTH: Mutex<BluetoothState> = Mutex::new(BluetoothState {
+    wanted: false,
+    state: String::new(),
+    devices: bluetooth::Devices::new(),
+    saved: sensors::Saved::new(),
+});
 
 fn bluetooth_state() -> MutexGuard<'static, BluetoothState> {
     BLUETOOTH.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -604,10 +612,16 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
 fn bluetooth_service() {
     let wanted = DATA_READY.load(Ordering::Acquire)
         && fs::read_to_string(BLUETOOTH_SETTING).is_ok_and(|text| text.trim() == "on");
+    let saved = if DATA_READY.load(Ordering::Acquire) {
+        sensors::Saved::from_text(&fs::read_to_string(SAVED_SENSORS).unwrap_or_default())
+    } else {
+        sensors::Saved::default()
+    };
     {
         let mut state = bluetooth_state();
         state.wanted = wanted;
         state.state = "off".to_string();
+        state.saved = saved;
     }
     loop {
         let starting = fs::read_to_string(WIFI_STATE).is_ok_and(|state| state.trim() == "starting");
@@ -725,9 +739,19 @@ fn bluetooth_report() -> String {
         ));
     }
     let sensors = state.devices.sensors();
-    if !sensors.is_empty() {
-        text.push_str(&format!("\n{} sensors:", sensors.len()));
-        for device in sensors {
+    text.push_str(&format!("\n{} saved sensors:", state.saved.addresses().len()));
+    for saved in state.saved.addresses() {
+        let summary = sensors
+            .iter()
+            .find(|device| device.address == *saved)
+            .map_or_else(|| "not heard".to_string(), |device| web::sensor_summary(device, now));
+        text.push_str(&format!("\n{} {summary}", bluetooth::address_text(saved)));
+    }
+    let others: Vec<&&bluetooth::Device> =
+        sensors.iter().filter(|device| !state.saved.contains(&device.address)).collect();
+    if !others.is_empty() {
+        text.push_str(&format!("\n{} other sensors heard, add one with: bluetooth add ADDRESS", others.len()));
+        for device in others {
             text.push_str(&format!(
                 "\n{} {}",
                 bluetooth::address_text(&device.address),
@@ -742,17 +766,23 @@ fn bluetooth_report() -> String {
 fn sensor_rows() -> Vec<(String, String)> {
     let state = bluetooth_state();
     let now = since_start();
+    let sensors = state.devices.sensors();
     state
-        .devices
-        .sensors()
-        .into_iter()
-        .map(|device| {
-            let address = bluetooth::address_text(&device.address);
-            let label = match &device.name {
-                Some(name) => format!("{name} {address}"),
-                None => address,
-            };
-            (label, web::sensor_summary(device, now))
+        .saved
+        .addresses()
+        .iter()
+        .map(|saved| {
+            let address = bluetooth::address_text(saved);
+            match sensors.iter().find(|device| device.address == *saved) {
+                Some(device) => {
+                    let label = match &device.name {
+                        Some(name) => format!("{name} {address}"),
+                        None => address,
+                    };
+                    (label, web::sensor_summary(device, now))
+                }
+                None => (address, "not heard in the last 10 minutes".to_string()),
+            }
         })
         .collect()
 }
@@ -764,16 +794,20 @@ fn save_sensor_history(since: Duration) -> io::Result<()> {
         return Ok(());
     }
     let time = wall_clock_text();
-    let lines: String = bluetooth_state()
+    let state = bluetooth_state();
+    let lines: String = state
         .devices
         .sensors()
         .into_iter()
+        .filter(|device| state.saved.contains(&device.address))
         .filter_map(|device| {
             let (reading, updated) = device.sensor.as_ref()?;
             (*updated > since)
                 .then(|| sensors::csv_line(&time, &bluetooth::address_text(&device.address), reading))
         })
         .collect();
+    // Not held while writing, so that the scan does not wait for the eMMC.
+    drop(state);
     if lines.is_empty() {
         return Ok(());
     }
@@ -998,7 +1032,10 @@ fn run_status_screen() -> io::Result<()> {
             panel.reset();
             was_on = false;
         } else if on {
-            panel.render(&mut canvas, &snapshot());
+            let status = snapshot();
+            // Taps until the next drawing pick from these, which are what is shown.
+            panel.set_sensors(status.bluetooth_saved.clone(), status.bluetooth_candidates.clone());
+            panel.render(&mut canvas, &status);
             framebuffer.present(canvas.pixels())?;
         }
 
@@ -1088,7 +1125,21 @@ fn snapshot() -> Snapshot {
                 state.state.clone()
             }
         },
-        bluetooth_sensors: panel_sensor_lines(),
+        bluetooth_saved: saved_sensor_rows(),
+        bluetooth_candidates: {
+            let state = bluetooth_state();
+            state
+                .devices
+                .sensors()
+                .into_iter()
+                .filter(|device| !state.saved.contains(&device.address))
+                .filter_map(|device| {
+                    let (reading, _) = device.sensor.as_ref()?;
+                    let address = bluetooth::address_text(&device.address);
+                    Some(SensorRow { line: format!("{address} {}", sensors::short_values(reading)), address })
+                })
+                .collect()
+        },
         bluetooth_nearby: {
             let state = bluetooth_state();
             state
@@ -1102,33 +1153,45 @@ fn snapshot() -> Snapshot {
     }
 }
 
-/// For each sensor, a label line with the name or address, the battery and the age,
-/// and a values line with the temperature and humidity. Short enough for the panel.
-fn panel_sensor_lines() -> Vec<(String, String)> {
+/// The saved sensors as panel rows, in the order they were added, with their latest
+/// values or `not heard`.
+fn saved_sensor_rows() -> Vec<SensorRow> {
     let state = bluetooth_state();
-    let now = since_start();
+    let sensors = state.devices.sensors();
     state
-        .devices
-        .sensors()
-        .into_iter()
-        .filter_map(|device| {
-            let (reading, updated) = device.sensor.as_ref()?;
-            let mut label =
-                device.name.clone().unwrap_or_else(|| bluetooth::address_text(&device.address));
-            if let Some(battery) = reading.battery_percent {
-                label.push_str(&format!("  BAT {battery}%"));
-            }
-            label.push_str(&format!("  {} s", now.saturating_sub(*updated).as_secs()));
-            let mut values = Vec::new();
-            if let Some(value) = reading.temperature_centi {
-                values.push(format!("{} C", sensors::centi_text(value.into())));
-            }
-            if let Some(value) = reading.humidity_centi {
-                values.push(format!("{}%", sensors::centi_text(value.into())));
-            }
-            Some((label, values.join("  ")))
+        .saved
+        .addresses()
+        .iter()
+        .map(|saved| {
+            let address = bluetooth::address_text(saved);
+            let values = sensors
+                .iter()
+                .find(|device| device.address == *saved)
+                .and_then(|device| device.sensor.as_ref())
+                .map_or_else(|| "not heard".to_string(), |(reading, _)| sensors::short_values(reading));
+            SensorRow { line: format!("{address} {values}"), address }
         })
         .collect()
+}
+
+/// Saves or removes a sensor in the list kept on /data.
+fn change_saved_sensor(add: bool, text: &str) -> io::Result<String> {
+    let address = bluetooth::parse_address(text)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "an address looks like 58:2d:34:36:74:93"))?;
+    if !DATA_READY.load(Ordering::Acquire) {
+        return Err(io::Error::other("/data is not mounted, so the list could not be kept"));
+    }
+    // Copied out, so that the scan does not wait for the eMMC.
+    let mut saved = bluetooth_state().saved.clone();
+    let changed = if add { saved.add(address).map_err(io::Error::other)? } else { saved.remove(&address) };
+    let name = bluetooth::address_text(&address);
+    if !changed {
+        return Ok(format!("{name} was {} saved", if add { "already" } else { "not" }));
+    }
+    write_private_file(SAVED_SENSORS, &saved.to_text())?;
+    bluetooth_state().saved = saved;
+    log(&format!("bluetooth: {} sensor {name}", if add { "saved" } else { "removed" }));
+    Ok(format!("{} {name}", if add { "saved" } else { "removed" }))
 }
 
 /// Describes the free space on /data.
@@ -1180,6 +1243,14 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                     say(format!("Joined: {}", address.unwrap_or_default()));
                 }
                 Err(err) => say(format!("Not joined: {err}")),
+            },
+            Request::AddSensor(address) => match change_saved_sensor(true, &address) {
+                Ok(text) => say(text),
+                Err(err) => say(format!("Not saved: {err}")),
+            },
+            Request::RemoveSensor(address) => match change_saved_sensor(false, &address) {
+                Ok(text) => say(text),
+                Err(err) => say(format!("Not removed: {err}")),
             },
             Request::Bluetooth(on) => match KernelPlatform.bluetooth(Some(on)) {
                 Ok(report) => say(report.lines().next().unwrap_or_default().to_string()),
@@ -2095,6 +2166,10 @@ impl Platform for KernelPlatform {
             thread::sleep(BLUETOOTH_IDLE_CHECK + POLL_INTERVAL);
         }
         Ok(bluetooth_report())
+    }
+
+    fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String> {
+        change_saved_sensor(add, address)
     }
 
     fn power_off(&self) -> io::Error {

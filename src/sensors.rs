@@ -64,6 +64,84 @@ pub fn centi_text(value: i64) -> String {
     format!("{sign}{}.{:02}", value.abs() / 100, value.abs() % 100)
 }
 
+/// The sensors chosen to show and record, by address in air order. A neighbor's
+/// sensor is heard too, so only these are kept in the history.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Saved {
+    addresses: Vec<[u8; 6]>,
+}
+
+pub const SAVED_LIMIT: usize = 16;
+
+impl Saved {
+    pub const fn new() -> Self {
+        Self { addresses: Vec::new() }
+    }
+
+    /// Reads one address per line. Lines that are not addresses are skipped, so a
+    /// damaged file loses only those lines.
+    pub fn from_text(text: &str) -> Self {
+        let mut saved = Self::default();
+        for address in text.lines().filter_map(crate::bluetooth::parse_address) {
+            let _ = saved.add(address);
+        }
+        saved
+    }
+
+    pub fn to_text(&self) -> String {
+        self.addresses.iter().map(|address| format!("{}\n", crate::bluetooth::address_text(address))).collect()
+    }
+
+    /// Returns false if it was already saved.
+    pub fn add(&mut self, address: [u8; 6]) -> Result<bool, String> {
+        if self.contains(&address) {
+            return Ok(false);
+        }
+        if self.addresses.len() >= SAVED_LIMIT {
+            return Err(format!("at most {SAVED_LIMIT} sensors can be saved"));
+        }
+        self.addresses.push(address);
+        Ok(true)
+    }
+
+    /// Returns false if it was not saved.
+    pub fn remove(&mut self, address: &[u8; 6]) -> bool {
+        let before = self.addresses.len();
+        self.addresses.retain(|kept| kept != address);
+        self.addresses.len() != before
+    }
+
+    pub fn contains(&self, address: &[u8; 6]) -> bool {
+        self.addresses.contains(address)
+    }
+
+    /// In the order they were added.
+    pub fn addresses(&self) -> &[[u8; 6]] {
+        &self.addresses
+    }
+}
+
+/// Temperature and humidity in tenths, short enough for a row on the panel, such as
+/// `26.0C 72.2% B93%`.
+pub fn short_values(reading: &Reading) -> String {
+    let tenths = |centi: i64| {
+        let rounded = if centi < 0 { (centi - 5) / 10 } else { (centi + 5) / 10 };
+        let sign = if rounded < 0 { "-" } else { "" };
+        format!("{sign}{}.{}", rounded.abs() / 10, rounded.abs() % 10)
+    };
+    let mut parts = Vec::new();
+    if let Some(value) = reading.temperature_centi {
+        parts.push(format!("{}C", tenths(value.into())));
+    }
+    if let Some(value) = reading.humidity_centi {
+        parts.push(format!("{}%", tenths(value.into())));
+    }
+    if let Some(value) = reading.battery_percent {
+        parts.push(format!("B{value}%"));
+    }
+    parts.join(" ")
+}
+
 pub const CSV_HEADER: &str = "time,address,format,temperature_c,humidity_percent,battery_percent\n";
 
 /// One row of the sensor history. Missing values are left empty.
@@ -336,6 +414,43 @@ mod tests {
         reading.merge(&Reading { format: Format::MiBeacon, temperature_centi: None, humidity_centi: None, battery_percent: Some(93) });
         assert_eq!(reading.temperature_centi, Some(2340));
         assert_eq!(reading.battery_percent, Some(93));
+    }
+
+    #[test]
+    fn keeps_a_saved_list() {
+        let first = crate::bluetooth::parse_address("58:2d:34:36:74:93").unwrap();
+        let second = crate::bluetooth::parse_address("a4:c1:38:4a:70:05").unwrap();
+        let mut saved = Saved::default();
+        assert_eq!(saved.add(first), Ok(true));
+        assert_eq!(saved.add(first), Ok(false));
+        assert_eq!(saved.add(second), Ok(true));
+        assert_eq!(saved.to_text(), "58:2d:34:36:74:93\na4:c1:38:4a:70:05\n");
+        assert_eq!(Saved::from_text(&saved.to_text()), saved);
+        assert!(saved.remove(&first));
+        assert!(!saved.remove(&first));
+        assert_eq!(saved.addresses(), &[second]);
+        // A damaged line is skipped, and the rest kept.
+        let text = "58:2d:34:36:74:93\ngarbage\n\na4:c1:38:4a:70:05\n";
+        assert_eq!(Saved::from_text(text).addresses().len(), 2);
+    }
+
+    #[test]
+    fn the_saved_list_has_a_limit() {
+        let mut saved = Saved::default();
+        for index in 0..SAVED_LIMIT {
+            assert_eq!(saved.add([index as u8, 0, 0, 0, 0, 0]), Ok(true));
+        }
+        assert!(saved.add([0xff, 0, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn short_values_round_to_tenths() {
+        let reading = Reading { format: Format::MiBeacon, temperature_centi: Some(2595), humidity_centi: Some(7220), battery_percent: Some(93) };
+        assert_eq!(short_values(&reading), "26.0C 72.2% B93%");
+        let cold = Reading { format: Format::BtHome, temperature_centi: Some(-526), humidity_centi: None, battery_percent: None };
+        assert_eq!(short_values(&cold), "-5.3C");
+        let tiny = Reading { format: Format::BtHome, temperature_centi: Some(-4), humidity_centi: None, battery_percent: None };
+        assert_eq!(short_values(&tiny), "0.0C");
     }
 
     #[test]

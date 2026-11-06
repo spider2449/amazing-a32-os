@@ -29,6 +29,7 @@ const HELP: &str = "commands:
   tcp HOST:PORT                try a TCP connection
   bluetooth                    show the BLE scan and the devices heard
   bluetooth on|off             start or stop the BLE scan, kept for later starts
+  bluetooth add|remove ADDRESS save a sensor to show and record, or remove it
   bench cpu|mem|disk PATH      measure performance
   bench write NEW_FILE         measure writes to a new file, then remove it
   bench display                measure drawing, with the screen off
@@ -65,6 +66,8 @@ pub trait Platform {
     fn wifi_forget(&self) -> io::Result<String>;
     /// Turns the BLE scan on or off and keeps that choice, or with `None` describes it.
     fn bluetooth(&self, switch: Option<bool>) -> io::Result<String>;
+    /// Saves or removes a BLE sensor, by its address as text.
+    fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -130,6 +133,12 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         ["bluetooth"] => platform.bluetooth(None).and_then(|text| writeln!(out, "{text}")),
         ["bluetooth", "on"] => platform.bluetooth(Some(true)).and_then(|text| writeln!(out, "{text}")),
         ["bluetooth", "off"] => platform.bluetooth(Some(false)).and_then(|text| writeln!(out, "{text}")),
+        ["bluetooth", "add", address] => {
+            platform.bluetooth_sensor(true, address).and_then(|text| writeln!(out, "{text}"))
+        }
+        ["bluetooth", "remove", address] => {
+            platform.bluetooth_sensor(false, address).and_then(|text| writeln!(out, "{text}"))
+        }
         ["tcp", address] => try_tcp(address, out),
         ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
             (Ok(x), Ok(y)) => platform.tap(x, y),
@@ -245,6 +254,10 @@ mod tests {
             Ok(format!("bluetooth {switch:?}"))
         }
 
+        fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String> {
+            Ok(format!("sensor add={add} {address}"))
+        }
+
         fn dhcp(&self, interface: &str) -> io::Result<String> {
             Ok(format!("lease on {interface}"))
         }
@@ -306,6 +319,9 @@ mod tests {
         assert!(session("bluetooth on\n").0.contains("bluetooth Some(true)"));
         assert!(session("bluetooth off\n").0.contains("bluetooth Some(false)"));
         assert!(session("bluetooth maybe\n").0.contains("unknown command"));
+        assert!(session("bluetooth add 58:2d:34:36:74:93\n").0.contains("sensor add=true 58:2d:34:36:74:93"));
+        assert!(session("bluetooth remove 58:2d:34:36:74:93\n").0.contains("sensor add=false 58:2d:34:36:74:93"));
+        assert!(session("bluetooth add\n").0.contains("unknown command"));
     }
 
     #[test]
