@@ -94,10 +94,11 @@ pub fn bluetooth_json(state: &str, devices: &[&Device], now: Duration) -> String
         .iter()
         .map(|device| {
             format!(
-                "{{\"address\":\"{}\",\"random\":{},\"name\":{},\"rssi\":{},\"seconds_ago\":{},\"reports\":{},\"sensor\":{}}}",
+                "{{\"address\":\"{}\",\"random\":{},\"name\":{},\"kind\":{},\"rssi\":{},\"seconds_ago\":{},\"reports\":{},\"sensor\":{}}}",
                 address_text(&device.address),
                 device.random,
                 device.name.as_deref().map_or("null".to_string(), escape_json),
+                device.kind.as_deref().map_or("null".to_string(), escape_json),
                 device.rssi,
                 now.saturating_sub(device.last_seen).as_secs(),
                 device.reports,
@@ -296,6 +297,7 @@ mod tests {
             address: [0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
             random: false,
             name: Some("Room \"A\"".to_string()),
+            kind: Some("Xiaomi".to_string()),
             rssi: -65,
             last_seen: Duration::from_secs(90),
             reports: 41,
@@ -304,14 +306,14 @@ mod tests {
                 Duration::from_secs(95),
             )),
         };
-        let unnamed = Device { address: [1, 2, 3, 4, 5, 6], random: true, name: None, rssi: -80, last_seen: Duration::from_secs(99), reports: 1, sensor: None };
+        let unnamed = Device { address: [1, 2, 3, 4, 5, 6], random: true, name: None, kind: None, rssi: -80, last_seen: Duration::from_secs(99), reports: 1, sensor: None };
         let text = bluetooth_json("scanning", &[&named, &unnamed], Duration::from_secs(100));
         assert_eq!(
             text,
             "{\"state\":\"scanning\",\"devices\":[\
-             {\"address\":\"11:22:33:44:55:66\",\"random\":false,\"name\":\"Room \\\"A\\\"\",\"rssi\":-65,\"seconds_ago\":10,\"reports\":41,\
+             {\"address\":\"11:22:33:44:55:66\",\"random\":false,\"name\":\"Room \\\"A\\\"\",\"kind\":\"Xiaomi\",\"rssi\":-65,\"seconds_ago\":10,\"reports\":41,\
              \"sensor\":{\"format\":\"mibeacon\",\"temperature_c\":-5.20,\"humidity_percent\":45.60,\"battery_percent\":93,\"seconds_ago\":5}},\
-             {\"address\":\"06:05:04:03:02:01\",\"random\":true,\"name\":null,\"rssi\":-80,\"seconds_ago\":1,\"reports\":1,\"sensor\":null}]}\n"
+             {\"address\":\"06:05:04:03:02:01\",\"random\":true,\"name\":null,\"kind\":null,\"rssi\":-80,\"seconds_ago\":1,\"reports\":1,\"sensor\":null}]}\n"
         );
         assert_eq!(sensor_summary(&named, Duration::from_secs(100)), "-5.20 C, 45.60%, battery 93%, 5 s ago");
         let rows = [("Room \"A\" 11:22:33:44:55:66".to_string(), sensor_summary(&named, Duration::from_secs(100)))];

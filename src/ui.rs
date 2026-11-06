@@ -409,7 +409,9 @@ impl Ui {
         match self.page {
             Page::Home => vec![
                 Button::new(split(BOTTOM_ROW, 3, 0), "WI-FI", Press::OpenNetworks),
-                Button::new(split(BOTTOM_ROW, 3, 1), "BLUETOOTH", Press::OpenBluetooth),
+                // Smaller, because nine letters at the normal size are wider than a third of
+                // the screen.
+                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 3, 1), "BLUETOOTH", Press::OpenBluetooth) },
                 Button::new(split(BOTTOM_ROW, 3, 2), "POWER", Press::OpenPower),
             ],
             Page::Power => vec![
@@ -975,6 +977,38 @@ mod tests {
                 for other in &buttons[index + 1..] {
                     assert!(!area.overlaps(other.area), "{page:?}: {:?} {:?}", button.press, other.press);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn every_fixed_label_fits_its_button() {
+        let mut ui = Ui::default();
+        let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols, Layer::MoreSymbols];
+        let mut pages: Vec<(Page, Layer)> = [
+            Page::Home,
+            Page::Power,
+            Page::ConfirmRestart,
+            Page::ConfirmPowerOff,
+            Page::ConfirmForget,
+            Page::Networks,
+            Page::Bluetooth,
+            Page::AddSensor,
+            Page::ConfirmRemoveSensor,
+        ]
+        .map(|page| (page, Layer::Lower))
+        .to_vec();
+        pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
+        for (page, layer) in pages {
+            ui.page = page;
+            ui.layer = layer;
+            // Rows of networks and sensors show data, so their length varies.
+            let fixed = ui.buttons().into_iter().filter(|button| {
+                !matches!(button.press, Press::Pick(_) | Press::PickSaved(_) | Press::PickCandidate(_))
+            });
+            for button in fixed {
+                let width = button.label.chars().count() as u32 * CHAR_WIDTH * button.scale;
+                assert!(width <= button.area.width, "{page:?}: {:?} is {width} px in {} px", button.label, button.area.width);
             }
         }
     }

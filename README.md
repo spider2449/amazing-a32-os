@@ -711,8 +711,10 @@ Bluetooth.
 
 ### BLE scan
 
-The init can keep a passive BLE scan running, which never transmits. It is off unless
-chosen, and the choice is kept in `/data/a32/bluetooth` across restarts:
+The init can keep a BLE scan running. It is active, as a phone's scan is: it asks each
+advertiser for its scan response, which is where most devices put their name. It never
+advertises or connects. It is off unless chosen, on the panel or the console, and the
+choice is kept in `/data/a32/bluetooth` across restarts:
 
 ```text
 bluetooth on
@@ -721,7 +723,11 @@ bluetooth off
 ```
 
 `bluetooth` lists the 20 strongest of the devices heard in the last 10 minutes, with
-the address, its type, the signal, when it was last heard and the name if it sends one.
+the address, its type, the signal, when it was last heard, and the name if it sends one,
+or else what kind of device it is. The kind comes from `src/identify.rs`, which reads
+the manufacturer ID, Apple's message type, the services named and the declared
+appearance, and only knows common values, such as `Apple Find My`, `Samsung` or
+`Google Fast Pair`. Anything else stays unknown rather than guessed.
 The list holds at most 256 devices, dropping the one heard from longest ago. The status
 page shows the count, and `/bluetooth.json` the whole list. Nothing is written to
 `/data` about the devices, and the log only records the scan starting and stopping.
@@ -729,8 +735,12 @@ page shows the count, and `/bluetooth.json` the whole list. Nothing is written t
 Test results, from RAM boots:
 
 - Turned on, the scan heard 10 to 11 devices in the first seconds and 31 to 41 within
-  a minute. Most use random addresses, which change over time. None sent a name: a
-  passive scan only gets names that devices put in their advertisements.
+  a minute. Most use random addresses, which change over time. As a passive scan, none
+  sent a name.
+- The active scan, after about 70 seconds, heard 49 devices: 9 with a name, such as
+  `MJ_HT_V1`, two `LYWSD03MMC`, `Galaxy Watch7` and `32" Smart Monitor M7`, 32 with only
+  a kind, mostly Apple devices, and 8 with neither. Whether the active scan costs Wi-Fi
+  more than the passive one was not measured.
 - After a restart with the choice kept, scanning started at 22.5 seconds, before Wi-Fi
   joined. `bluetooth off` stopped the scan, turned Bluetooth off in the driver and
   removed the setting.
@@ -771,11 +781,28 @@ Encrypted MiBeacon, which newer Xiaomi sensors such as the LYWSD03MMC send with 
 firmware, needs each sensor's key and is skipped. A MiBeacon advertisement carries
 either the climate or the battery, so a sensor's values are merged as they arrive.
 
-Sensors show under `bluetooth` on the console, in a Sensors table on the status page,
-and with a `sensor` object in `/bluetooth.json`. Every 5 minutes the latest values of
-each sensor heard since the last write are appended to `/data/a32/sensors.csv`, which
-moves to `sensors.csv.1` at 1 MiB. Any sensor in range is recorded, including a
-neighbor's, because the advertisements are public.
+A neighbor's sensor is heard as well as one's own, so only saved sensors are shown and
+recorded. The list is kept in `/data/a32/bluetooth-sensors`, at most 16. On the panel's
+Bluetooth page, ADD lists the sensors heard but not saved, and a tap saves one. Tapping
+a saved sensor asks before removing it, with the button below every sensor row, so a
+double tap cannot remove one. On the console:
+
+```text
+bluetooth add 58:2d:34:36:74:93
+bluetooth remove 58:2d:34:36:74:93
+```
+
+Saved sensors show under `bluetooth` on the console, on the panel, and in a Sensors table
+on the status page, or `not heard` when out of range. `/bluetooth.json` still lists every
+device, with a `sensor` object where one was read. Every 5 minutes the latest values of
+each saved sensor heard since the last write are appended to `/data/a32/sensors.csv`,
+which moves to `sensors.csv.1` at 1 MiB.
+
+Tested from RAM boots, with `ui tap`: ADD listed the LYWSDCGQ with its values, a tap
+saved it, and tapping it then YES, REMOVE removed it, each logged. On the console, adding
+it twice, removing an address not saved and adding a bad address each gave the right
+reply. The panel was also used by hand during these tests, which turned the scan off
+and removed the sensor, as the log shows.
 
 Test results, from a RAM boot: a survey of nearby advertisements
 (`scripts/bluetooth/ble-kinds.py`) found service data `0xFE95` from one device, and

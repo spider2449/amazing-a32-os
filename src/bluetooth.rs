@@ -1,6 +1,7 @@
 //! A BLE scanner that talks HCI straight to MediaTek's `/dev/stpbt`, because this
-//! kernel has no Bluetooth stack. It only listens: it never advertises, connects or
-//! sends anything over the air beyond what a passive scan needs, which is nothing.
+//! kernel has no Bluetooth stack. The scan is active, as a phone's is: it asks each
+//! advertiser for its scan response, which is where most devices put their name. It
+//! never advertises or connects.
 //! Packets are H4: a type byte, then an HCI command or event. Nothing here does
 //! I/O, so it runs on the host in unit tests.
 
@@ -51,8 +52,9 @@ pub fn start_scan() -> Vec<(u16, Vec<u8>)> {
         (SET_EVENT_MASK, vec![0xFF; 8]),
         // Advertising reports and the other LE events of Bluetooth 4.0.
         (LE_SET_EVENT_MASK, vec![0x1F, 0, 0, 0, 0, 0, 0, 0]),
-        // Passive, public own address, accept all advertisers.
-        (LE_SET_SCAN_PARAMETERS, vec![0x00, interval_low, interval_high, window_low, window_high, 0x00, 0x00]),
+        // Active, so that devices send their scan response with the name, public own
+        // address, accept all advertisers.
+        (LE_SET_SCAN_PARAMETERS, vec![0x01, interval_low, interval_high, window_low, window_high, 0x00, 0x00]),
         // On, and repeats kept so that the signal strength stays current.
         (LE_SET_SCAN_ENABLE, vec![0x01, 0x00]),
     ]
@@ -72,6 +74,8 @@ pub struct Advertisement {
     pub random: bool,
     pub rssi: i8,
     pub name: Option<String>,
+    /// What kind of device it is, from the clues in the data, if any is known.
+    pub kind: Option<String>,
     pub sensor: Option<Reading>,
 }
 
@@ -151,6 +155,7 @@ fn parse_reports(body: &[u8]) -> Vec<Advertisement> {
             random,
             rssi: rest[9 + data_length] as i8,
             name: local_name(data),
+            kind: crate::identify::kind(data),
             sensor: sensors::parse(data),
         });
         rest = &rest[10 + data_length..];
@@ -212,6 +217,7 @@ pub struct Device {
     pub address: [u8; 6],
     pub random: bool,
     pub name: Option<String>,
+    pub kind: Option<String>,
     pub rssi: i8,
     pub last_seen: Duration,
     pub reports: u64,
@@ -224,6 +230,13 @@ pub struct Device {
 #[derive(Default)]
 pub struct Devices {
     by_address: BTreeMap<[u8; 6], Device>,
+}
+
+impl Device {
+    /// What to call the device in a list: its name, else its kind.
+    pub fn label(&self) -> Option<&str> {
+        self.name.as_deref().or(self.kind.as_deref())
+    }
 }
 
 impl Devices {
@@ -245,6 +258,7 @@ impl Devices {
             address: advertisement.address,
             random: advertisement.random,
             name: None,
+            kind: None,
             rssi: advertisement.rssi,
             last_seen: now,
             reports: 0,
@@ -256,6 +270,10 @@ impl Devices {
         // A scan response may carry the name while the advertisement does not.
         if advertisement.name.is_some() {
             device.name.clone_from(&advertisement.name);
+        }
+        // A scan response may not repeat the clues of the advertisement.
+        if advertisement.kind.is_some() {
+            device.kind.clone_from(&advertisement.kind);
         }
         if let Some(reading) = &advertisement.sensor {
             match &mut device.sensor {
@@ -300,7 +318,7 @@ mod tests {
     }
 
     fn advertisement(last: u8, rssi: i8, name: Option<&str>) -> Advertisement {
-        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string), sensor: None }
+        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string), kind: None, sensor: None }
     }
 
     #[test]
@@ -310,7 +328,7 @@ mod tests {
         let scan = start_scan();
         assert_eq!(scan.first().map(|(opcode, _)| *opcode), Some(RESET));
         let (_, parameters) = &scan[3];
-        assert_eq!(parameters, &vec![0x00, 0xE0, 0x01, 0x30, 0x00, 0x00, 0x00]);
+        assert_eq!(parameters, &vec![0x01, 0xE0, 0x01, 0x30, 0x00, 0x00, 0x00]);
     }
 
     #[test]
@@ -396,6 +414,16 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_kind_seen_once() {
+        let mut devices = Devices::default();
+        devices.record(&Advertisement { kind: Some("Samsung".to_string()), ..advertisement(1, -70, None) }, s(1));
+        devices.record(&advertisement(1, -70, Some("Galaxy Buds")), s(2));
+        let device = devices.list()[0];
+        assert_eq!(device.kind.as_deref(), Some("Samsung"));
+        assert_eq!(device.label(), Some("Galaxy Buds"));
+    }
+
+    #[test]
     fn merges_sensor_frames_from_one_device() {
         use crate::sensors::Format;
         let climate = Reading { format: Format::MiBeacon, temperature_centi: Some(2340), humidity_centi: Some(4560), battery_percent: None };
@@ -426,7 +454,7 @@ mod tests {
         for index in 0..DEVICE_LIMIT + 10 {
             let mut address = [0u8; 6];
             address[..2].copy_from_slice(&(index as u16).to_le_bytes());
-            devices.record(&Advertisement { address, random: true, rssi: -90, name: None, sensor: None }, s(index as u64));
+            devices.record(&Advertisement { address, random: true, rssi: -90, name: None, kind: None, sensor: None }, s(index as u64));
         }
         assert_eq!(devices.list().len(), DEVICE_LIMIT);
         // The first ones heard made room for the last ones.

@@ -735,7 +735,7 @@ fn bluetooth_report() -> String {
             device.rssi,
             now.saturating_sub(device.last_seen).as_secs(),
             if device.random { "random " } else { "" },
-            device.name.as_deref().unwrap_or(""),
+            device.label().unwrap_or(""),
         ));
     }
     let sensors = state.devices.sensors();
@@ -1136,7 +1136,12 @@ fn snapshot() -> Snapshot {
                 .filter_map(|device| {
                     let (reading, _) = device.sensor.as_ref()?;
                     let address = bluetooth::address_text(&device.address);
-                    Some(SensorRow { line: format!("{address} {}", sensors::short_values(reading)), address })
+                    // The address too, because two sensors of one model share a name.
+                    let line = match &device.name {
+                        Some(name) => format!("{name} {} {}", &address[9..], sensors::short_values(reading)),
+                        None => format!("{address} {}", sensors::short_values(reading)),
+                    };
+                    Some(SensorRow { line, address })
                 })
                 .collect()
         },
@@ -1147,7 +1152,10 @@ fn snapshot() -> Snapshot {
                 .list()
                 .iter()
                 .take(BLUETOOTH_PANEL_NEARBY)
-                .map(|device| format!("{}  {} dBm", bluetooth::address_text(&device.address), device.rssi))
+                .map(|device| match device.label() {
+                    Some(label) => format!("{:>4}  {label}", device.rssi),
+                    None => format!("{:>4}  {}", device.rssi, bluetooth::address_text(&device.address)),
+                })
                 .collect()
         },
     }
@@ -1164,12 +1172,15 @@ fn saved_sensor_rows() -> Vec<SensorRow> {
         .iter()
         .map(|saved| {
             let address = bluetooth::address_text(saved);
-            let values = sensors
-                .iter()
-                .find(|device| device.address == *saved)
+            let device = sensors.iter().find(|device| device.address == *saved);
+            let values = device
                 .and_then(|device| device.sensor.as_ref())
                 .map_or_else(|| "not heard".to_string(), |(reading, _)| sensors::short_values(reading));
-            SensorRow { line: format!("{address} {values}"), address }
+            let line = match device.and_then(|device| device.name.as_deref()) {
+                Some(name) => format!("{name} {values}"),
+                None => format!("{address} {values}"),
+            };
+            SensorRow { line, address }
         })
         .collect()
 }
