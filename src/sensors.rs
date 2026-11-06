@@ -182,6 +182,36 @@ pub fn parse(mut data: &[u8]) -> Option<Reading> {
     None
 }
 
+/// Whether advertising data carries sensor values that need a key to read: encrypted
+/// MiBeacon or encrypted BTHome. Such a sensor is heard, but `parse` finds nothing.
+pub fn is_encrypted(mut data: &[u8]) -> bool {
+    while let Some((&length, rest)) = data.split_first() {
+        let length = usize::from(length);
+        if length == 0 || rest.len() < length {
+            break;
+        }
+        let (kind, value) = (rest[0], &rest[1..length]);
+        if kind == AD_SERVICE_DATA_16 && value.len() >= 3 {
+            let uuid = u16::from_le_bytes([value[0], value[1]]);
+            let body = &value[2..];
+            let encrypted = match uuid {
+                // Encrypted, and with an object: a frame without one carries no values.
+                UUID_MIBEACON if body.len() >= 2 => {
+                    let control = u16::from_le_bytes([body[0], body[1]]);
+                    control & 0x0008 != 0 && control & 0x0040 != 0
+                }
+                UUID_BTHOME => body[0] & 0x01 != 0,
+                _ => false,
+            };
+            if encrypted {
+                return true;
+            }
+        }
+        data = &rest[length..];
+    }
+    false
+}
+
 fn i16_le(bytes: &[u8]) -> i32 {
     i32::from(i16::from_le_bytes([bytes[0], bytes[1]]))
 }
@@ -342,6 +372,24 @@ mod tests {
         // An object longer than the data is not misread.
         let short = hex("5020 aa01 17 665544332211 0d10 04 ea00");
         assert_eq!(parse(&advertisement(UUID_MIBEACON, &short)), None);
+    }
+
+    #[test]
+    fn tells_which_sensors_need_a_key() {
+        // Frame control 0x5858 and product 0x055B, as heard from a LYWSD03MMC on this
+        // phone, with a made up counter, address and payload.
+        let encrypted = hex("5858 5b05 17 665544332211 0102030405 000000 01020304");
+        assert!(is_encrypted(&advertisement(UUID_MIBEACON, &encrypted)));
+        assert_eq!(parse(&advertisement(UUID_MIBEACON, &encrypted)), None);
+        // Also heard from it: a frame without an object, which carries no values.
+        let empty = hex("3058 5b05 17 665544332211 08");
+        assert!(!is_encrypted(&advertisement(UUID_MIBEACON, &empty)));
+        // The readable LYWSDCGQ frame is not encrypted.
+        let open = hex("5020 aa01 17 665544332211 0d10 04 ea00 c801");
+        assert!(!is_encrypted(&advertisement(UUID_MIBEACON, &open)));
+        assert!(is_encrypted(&advertisement(UUID_BTHOME, &hex("41 02 ca09"))));
+        assert!(!is_encrypted(&advertisement(UUID_BTHOME, &hex("40 02 ca09"))));
+        assert!(!is_encrypted(&hex("020106")));
     }
 
     #[test]

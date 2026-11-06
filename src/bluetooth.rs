@@ -77,6 +77,8 @@ pub struct Advertisement {
     /// What kind of device it is, from the clues in the data, if any is known.
     pub kind: Option<String>,
     pub sensor: Option<Reading>,
+    /// Sensor values that need a key, so cannot be read here.
+    pub encrypted: bool,
 }
 
 /// Splits a byte stream into events. Reads from the device can hold part of an
@@ -157,6 +159,7 @@ fn parse_reports(body: &[u8]) -> Vec<Advertisement> {
             name: local_name(data),
             kind: crate::identify::kind(data),
             sensor: sensors::parse(data),
+            encrypted: sensors::is_encrypted(data),
         });
         rest = &rest[10 + data_length..];
     }
@@ -224,6 +227,8 @@ pub struct Device {
     /// The latest values from a sensor, merged across advertisements, and when the
     /// last one came.
     pub sensor: Option<(Reading, Duration)>,
+    /// Set once the device has sent encrypted sensor values.
+    pub encrypted: bool,
 }
 
 /// The devices heard recently.
@@ -263,6 +268,7 @@ impl Devices {
             last_seen: now,
             reports: 0,
             sensor: None,
+            encrypted: false,
         });
         device.rssi = advertisement.rssi;
         device.last_seen = now;
@@ -271,6 +277,7 @@ impl Devices {
         if advertisement.name.is_some() {
             device.name.clone_from(&advertisement.name);
         }
+        device.encrypted |= advertisement.encrypted;
         // A scan response may not repeat the clues of the advertisement.
         if advertisement.kind.is_some() {
             device.kind.clone_from(&advertisement.kind);
@@ -318,7 +325,7 @@ mod tests {
     }
 
     fn advertisement(last: u8, rssi: i8, name: Option<&str>) -> Advertisement {
-        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string), kind: None, sensor: None }
+        Advertisement { address: [last, 0, 0, 0, 0, 0x11], random: false, rssi, name: name.map(str::to_string), kind: None, sensor: None, encrypted: false }
     }
 
     #[test]
@@ -424,6 +431,14 @@ mod tests {
     }
 
     #[test]
+    fn remembers_that_a_device_is_encrypted() {
+        let mut devices = Devices::default();
+        devices.record(&Advertisement { encrypted: true, ..advertisement(1, -40, None) }, s(1));
+        devices.record(&advertisement(1, -40, Some("LYWSD03MMC")), s(2));
+        assert!(devices.list()[0].encrypted);
+    }
+
+    #[test]
     fn merges_sensor_frames_from_one_device() {
         use crate::sensors::Format;
         let climate = Reading { format: Format::MiBeacon, temperature_centi: Some(2340), humidity_centi: Some(4560), battery_percent: None };
@@ -454,7 +469,7 @@ mod tests {
         for index in 0..DEVICE_LIMIT + 10 {
             let mut address = [0u8; 6];
             address[..2].copy_from_slice(&(index as u16).to_le_bytes());
-            devices.record(&Advertisement { address, random: true, rssi: -90, name: None, kind: None, sensor: None }, s(index as u64));
+            devices.record(&Advertisement { address, random: true, rssi: -90, name: None, kind: None, sensor: None, encrypted: false }, s(index as u64));
         }
         assert_eq!(devices.list().len(), DEVICE_LIMIT);
         // The first ones heard made room for the last ones.

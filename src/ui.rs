@@ -73,6 +73,8 @@ pub struct Snapshot {
 pub struct SensorRow {
     pub address: String,
     pub line: String,
+    /// False for a sensor whose values are encrypted, which cannot be saved.
+    pub readable: bool,
 }
 
 /// Work the panel cannot do itself, because it would stop the screen responding.
@@ -312,7 +314,10 @@ impl Ui {
             }
             Press::OpenAddSensor => self.page = Page::AddSensor,
             Press::PickCandidate(index) => {
-                if let Some(row) = self.candidates.get(index) {
+                if self.candidates.get(index).is_some_and(|row| !row.readable) {
+                    // Short enough for one line. The row shows which sensor it is.
+                    self.message = "Encrypted, so it cannot be read.".to_string();
+                } else if let Some(row) = self.candidates.get(index) {
                     self.page = Page::Bluetooth;
                     self.message = "Adding...".to_string();
                     return Some(Request::AddSensor(row.address.clone()));
@@ -1056,6 +1061,7 @@ mod tests {
             .map(|index| SensorRow {
                 address: format!("aa:bb:cc:dd:ee:{index:02x}"),
                 line: format!("aa:bb:cc:dd:ee:{index:02x} -25.9C 100.0% B100% and more"),
+                readable: true,
             })
             .collect()
     }
@@ -1072,6 +1078,14 @@ mod tests {
         }
         assert_eq!(ui.page, Page::Bluetooth);
         assert_eq!(ui.message, "Adding...");
+        // An encrypted sensor is listed, but says why it cannot be added.
+        let mut list = rows(2);
+        list[0].readable = false;
+        ui.page = Page::AddSensor;
+        ui.set_sensors(vec![], list);
+        assert!(tap_button(&mut ui, Press::PickCandidate(0)).is_none());
+        assert_eq!(ui.page, Page::AddSensor);
+        assert_eq!(ui.message, "Encrypted, so it cannot be read.");
         // A list that shrank since it was drawn picks nothing.
         ui.page = Page::AddSensor;
         ui.set_sensors(vec![], rows(1));

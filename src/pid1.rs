@@ -1128,20 +1128,25 @@ fn snapshot() -> Snapshot {
         bluetooth_saved: saved_sensor_rows(),
         bluetooth_candidates: {
             let state = bluetooth_state();
-            state
-                .devices
-                .sensors()
-                .into_iter()
+            // Readable sensors first, then encrypted ones, listed so that the page can
+            // say why they cannot be added.
+            let readable = state.devices.sensors().into_iter();
+            let encrypted = state.devices.list().into_iter().filter(|device| device.encrypted && device.sensor.is_none());
+            readable
+                .chain(encrypted)
                 .filter(|device| !state.saved.contains(&device.address))
-                .filter_map(|device| {
-                    let (reading, _) = device.sensor.as_ref()?;
+                .map(|device| {
                     let address = bluetooth::address_text(&device.address);
+                    let values = device
+                        .sensor
+                        .as_ref()
+                        .map_or_else(|| "encrypted".to_string(), |(reading, _)| sensors::short_values(reading));
                     // The address too, because two sensors of one model share a name.
                     let line = match &device.name {
-                        Some(name) => format!("{name} {} {}", &address[9..], sensors::short_values(reading)),
-                        None => format!("{address} {}", sensors::short_values(reading)),
+                        Some(name) => format!("{name} {} {values}", &address[9..]),
+                        None => format!("{address} {values}"),
                     };
-                    Some(SensorRow { line, address })
+                    SensorRow { line, address, readable: device.sensor.is_some() }
                 })
                 .collect()
         },
@@ -1180,7 +1185,7 @@ fn saved_sensor_rows() -> Vec<SensorRow> {
                 Some(name) => format!("{name} {values}"),
                 None => format!("{address} {values}"),
             };
-            SensorRow { line, address }
+            SensorRow { line, address, readable: true }
         })
         .collect()
 }
@@ -1191,6 +1196,17 @@ fn change_saved_sensor(add: bool, text: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "an address looks like 58:2d:34:36:74:93"))?;
     if !DATA_READY.load(Ordering::Acquire) {
         return Err(io::Error::other("/data is not mounted, so the list could not be kept"));
+    }
+    let encrypted = bluetooth_state()
+        .devices
+        .list()
+        .iter()
+        .any(|device| device.address == address && device.encrypted && device.sensor.is_none());
+    if add && encrypted {
+        return Err(io::Error::other(format!(
+            "{} sends encrypted values, which cannot be read here",
+            bluetooth::address_text(&address)
+        )));
     }
     // Copied out, so that the scan does not wait for the eMMC.
     let mut saved = bluetooth_state().saved.clone();

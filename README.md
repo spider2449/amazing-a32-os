@@ -781,6 +781,15 @@ Encrypted MiBeacon, which newer Xiaomi sensors such as the LYWSD03MMC send with 
 firmware, needs each sensor's key and is skipped. A MiBeacon advertisement carries
 either the climate or the battery, so a sensor's values are merged as they arrive.
 
+Such a sensor is still recognized as encrypted, from the MiBeacon or BTHome header. The
+panel's ADD page lists it marked `encrypted`, and a tap says it cannot be read instead
+of saving it, and `bluetooth add` refuses it, because it would never show values. A
+LYWSD03MMC next to the phone, product `0x055B`, sent frame control `0x5858`: MiBeacon
+version 5, encrypted, with an object. It showed on the ADD page as `LYWSD03MMC 4a:70:05
+encrypted`, a tap saved nothing, and `bluetooth add` refused it. Reading it would need
+its key from the Xiaomi account, or the pvvx firmware on the sensor, which sends
+unencrypted BTHome or pvvx frames that this already reads.
+
 A neighbor's sensor is heard as well as one's own, so only saved sensors are shown and
 recorded. The list is kept in `/data/a32/bluetooth-sensors`, at most 16. On the panel's
 Bluetooth page, ADD lists the sensors heard but not saved, and a tap saves one. Tapping
