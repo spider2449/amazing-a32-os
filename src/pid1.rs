@@ -41,7 +41,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, TryLockError};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -319,6 +319,97 @@ enum PanelInput {
     /// What the console's shell wrote, and that it ended.
     TerminalOutput(Vec<u8>),
     TerminalEnded,
+    /// The live view with this number has a new frame waiting, or ended and why.
+    LiveFrame(u32),
+    LiveEnded(u32, String),
+}
+
+/// Live video on the panel ends after this long; LIVE starts it again. Frames keep
+/// the screen on, so this is also how long it stays on without a touch.
+const PANEL_LIVE_LIMIT: Duration = Duration::from_secs(3 * 60);
+
+/// Live video on the camera page. Its thread leaves only the newest frame in
+/// `frame`, so a slow panel skips frames instead of falling behind.
+struct LiveView {
+    number: u32,
+    stop: Arc<AtomicBool>,
+    frame: Arc<Mutex<Option<photo::Rgb>>>,
+    thread: thread::JoinHandle<()>,
+    started: Instant,
+    /// Frames the panel took from `frame` and drew.
+    shown: u32,
+}
+
+impl LiveView {
+    fn start(name: &'static str, number: u32, panel: mpsc::Sender<PanelInput>) -> io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let frame = Arc::new(Mutex::new(None));
+        let (stopping, slot) = (stop.clone(), frame.clone());
+        let thread = thread::Builder::new().spawn(move || {
+            let Some(camera) = camera::by_name(name) else { return };
+            log(&format!("camera: {name} live view on the panel"));
+            let result = camera::live(camera, PANEL_LIVE_LIMIT, |image| {
+                if stopping.load(Ordering::Acquire) {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                let mut waiting = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Only an empty slot needs telling the panel; otherwise it is told already.
+                if waiting.replace(image).is_none() && panel.send(PanelInput::LiveFrame(number)).is_err() {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                Ok(())
+            });
+            let message = match result {
+                Ok(summary) => {
+                    let seconds = summary.elapsed.as_secs_f32().max(0.001);
+                    log(&format!(
+                        "camera: {name} panel live view ended: {} frames {}x{} in {:.0} s ({:.1} fps), \
+                         {} sensor frames passed over; shutter {} gain {:.2}x",
+                        summary.sent,
+                        summary.width,
+                        summary.height,
+                        seconds,
+                        summary.sent as f32 / seconds,
+                        summary.skipped,
+                        summary.exposure.shutter,
+                        summary.exposure.gain as f32 / photo::UNIT_GAIN as f32,
+                    ));
+                    format!("Live video ended after {} min", PANEL_LIVE_LIMIT.as_secs() / 60)
+                }
+                Err(err) => {
+                    log(&format!("camera: {name} panel live view failed: {err}"));
+                    format!("Live video failed: {err}")
+                }
+            };
+            // Ignored by the panel once this view was stopped or replaced.
+            let _ = panel.send(PanelInput::LiveEnded(number, message));
+        })?;
+        Ok(LiveView { number, stop, frame, thread, started: Instant::now(), shown: 0 })
+    }
+
+    /// Stops the view and waits for the camera to be free, which takes up to a
+    /// frame and closing the camera, so that another view can start at once.
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.thread.join();
+        let seconds = self.started.elapsed().as_secs_f32().max(0.001);
+        log(&format!("panel: live view showed {} frames ({:.1} fps)", self.shown, self.shown as f32 / seconds));
+    }
+}
+
+/// Acts on the camera page's live video requests, which the panel loop handles
+/// itself because the view runs until stopped.
+fn live_request(live: &mut Option<LiveView>, count: &mut u32, panel: &mut Ui, request: Request, input: &mpsc::Sender<PanelInput>) {
+    if let Some(view) = live.take() {
+        view.stop();
+    }
+    if let Request::Live(name) = request {
+        *count = count.wrapping_add(1);
+        match LiveView::start(name, *count, input.clone()) {
+            Ok(view) => *live = Some(view),
+            Err(err) => panel.live_ended(format!("Live video failed: {err}")),
+        }
+    }
 }
 
 /// The shell of the panel's console, on a pseudo-terminal.
@@ -1219,6 +1310,8 @@ fn run_status_screen() -> io::Result<()> {
     let mut canvas = Canvas::new(format);
     let mut panel = Ui::default();
     let mut shell: Option<ConsoleShell> = None;
+    let mut live: Option<LiveView> = None;
+    let mut live_count = 0u32;
     let mut last_use = Instant::now();
     let mut was_on = true;
     // A touch that wakes the screen must not also press a button under the finger.
@@ -1232,11 +1325,13 @@ fn run_status_screen() -> io::Result<()> {
         }
         if !on && was_on {
             panel.reset();
+            live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
         }
         was_on = on;
         if on && last_use.elapsed() >= SCREEN_TIMEOUT {
             set_screen(false);
             panel.reset();
+            live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
             was_on = false;
         } else if on {
             let status = snapshot();
@@ -1248,7 +1343,10 @@ fn run_status_screen() -> io::Result<()> {
 
         // Redraw when something changes, and otherwise once a second.
         if let Ok(first) = inputs.recv_timeout(Duration::from_secs(1)) {
-            for event in std::iter::once(first).chain(inputs.try_iter()) {
+            // Only what is queued now: events that keep arriving, such as live
+            // frames, would otherwise hold off drawing for ever.
+            let queued: Vec<PanelInput> = std::iter::once(first).chain(inputs.try_iter()).collect();
+            for event in queued {
                 match event {
                     PanelInput::Touch(position) => {
                         last_use = Instant::now();
@@ -1264,6 +1362,9 @@ fn run_status_screen() -> io::Result<()> {
                         match panel.touch(position) {
                             Some(request @ (Request::TerminalSize { .. } | Request::TerminalInput(_))) => {
                                 console_request(&mut shell, &mut panel, request, &input);
+                            }
+                            Some(request @ (Request::Live(_) | Request::StopLive)) => {
+                                live_request(&mut live, &mut live_count, &mut panel, request, &input);
                             }
                             Some(request) => {
                                 let _ = requests.send(request);
@@ -1289,6 +1390,23 @@ fn run_status_screen() -> io::Result<()> {
                     PanelInput::Message(message) => {
                         last_use = Instant::now();
                         panel.set_message(message);
+                    }
+                    // Frames from a view already stopped or replaced are dropped.
+                    PanelInput::LiveFrame(number) => {
+                        let Some(view) = live.as_mut().filter(|view| view.number == number) else { continue };
+                        let image = view.frame.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+                        if let Some(image) = image {
+                            last_use = Instant::now();
+                            panel.show_live(&image);
+                            view.shown += 1;
+                        }
+                    }
+                    PanelInput::LiveEnded(number, message) => {
+                        if live.as_ref().is_some_and(|view| view.number == number) {
+                            live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
+                            last_use = Instant::now();
+                            panel.live_ended(message);
+                        }
                     }
                 }
             }
@@ -1507,7 +1625,7 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                 Err(err) => say(format!("Not removed: {err}")),
             },
             // Handled by the panel loop, which owns the shell; never sent here.
-            Request::TerminalSize { .. } | Request::TerminalInput(_) => {}
+            Request::TerminalSize { .. } | Request::TerminalInput(_) | Request::Live(_) | Request::StopLive => {}
             Request::Photo(camera) => match take_photo(camera) {
                 Ok(photo) => {
                     say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));

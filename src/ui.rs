@@ -107,6 +107,10 @@ pub enum Request {
     RemoveSensor(String),
     /// Takes a photo with the named camera, "rear" or "front".
     Photo(&'static str),
+    /// Shows live video from the named camera on the camera page, in place of
+    /// any live video already shown.
+    Live(&'static str),
+    StopLive,
     /// Starts the console's shell if it is not running, and gives it this size.
     TerminalSize { columns: usize, rows: usize },
     /// What was typed on the console page, for the shell.
@@ -178,6 +182,7 @@ enum Press {
     RemoveSensor,
     OpenCamera,
     Photo(&'static str),
+    ToggleLive,
     OpenConsole,
     /// Hides or shows the console's keyboard.
     ToggleConsoleKeys,
@@ -209,6 +214,11 @@ impl Button {
     }
 }
 
+/// An image made small enough for the camera page.
+fn fit_photo(image: &photo::Rgb) -> photo::Rgb {
+    photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize)
+}
+
 /// One of `parts` equal buttons side by side, with a gap between them.
 fn split(area: Rect, parts: u32, index: u32) -> Rect {
     let each = area.width / parts;
@@ -238,8 +248,10 @@ pub struct Ui {
     candidates: Vec<SensorRow>,
     /// The address of the sensor being removed.
     sensor_target: Option<String>,
-    /// The last photo, already sized for the camera page.
+    /// The last photo or live frame, already sized for the camera page.
     photo: Option<photo::Rgb>,
+    /// The camera showing live video, if any.
+    live: Option<&'static str>,
     /// The console page: the shell's output, whether the keyboard shows, whether
     /// Ctrl is held for the next key, how many lines the view is scrolled back,
     /// and while a finger drags the text, where it started and the scroll then.
@@ -267,6 +279,7 @@ impl Default for Ui {
             candidates: Vec::new(),
             sensor_target: None,
             photo: None,
+            live: None,
             terminal: Terminal::new(TERMINAL_COLUMNS, terminal_rows(true)),
             console_keys: true,
             control: false,
@@ -299,7 +312,21 @@ impl Ui {
 
     /// Shows a photo on the camera page, made smaller to fit it.
     pub fn set_photo(&mut self, image: &photo::Rgb) {
-        self.photo = Some(photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize));
+        self.photo = Some(fit_photo(image));
+    }
+
+    /// Shows a live frame, unless live video has stopped since it was taken.
+    pub fn show_live(&mut self, image: &photo::Rgb) {
+        if self.live.is_some() {
+            self.set_photo(image);
+        }
+    }
+
+    /// Live video stopped on its own, for example at its time limit or when the
+    /// camera was busy. The last frame stays.
+    pub fn live_ended(&mut self, message: String) {
+        self.live = None;
+        self.message = message;
     }
 
     /// Output from the console's shell. A view scrolled back stays on the same lines.
@@ -347,6 +374,7 @@ impl Ui {
         self.sensor_target = None;
         // A photo should not wait on a dark screen for the next person to wake it.
         self.photo = None;
+        self.live = None;
         self.clear_typed();
     }
 
@@ -406,6 +434,11 @@ impl Ui {
         // later, which is how a result from another page reaches the screen.
         let page = self.page;
         let request = self.apply(press);
+        // Live video only runs while its page shows.
+        if page == Page::Camera && self.page != Page::Camera && self.live.take().is_some() {
+            self.message.clear();
+            return Some(Request::StopLive);
+        }
         if self.page != page && request.is_none() {
             self.message.clear();
         }
@@ -422,9 +455,28 @@ impl Ui {
             Press::OpenPower => self.page = Page::Power,
             Press::OpenBluetooth => self.page = Page::Bluetooth,
             Press::OpenCamera => self.page = Page::Camera,
+            // During live video, REAR and FRONT switch cameras instead.
+            Press::Photo(camera) if self.live.is_some() => {
+                if self.live != Some(camera) {
+                    self.live = Some(camera);
+                    self.photo = None;
+                    self.message = format!("Live: {camera}");
+                    return Some(Request::Live(camera));
+                }
+            }
             Press::Photo(camera) => {
                 self.message = "Taking a photo...".to_string();
                 return Some(Request::Photo(camera));
+            }
+            Press::ToggleLive => {
+                if self.live.take().is_some() {
+                    self.message = "Live video stopped".to_string();
+                    return Some(Request::StopLive);
+                }
+                self.live = Some("rear");
+                self.photo = None;
+                self.message = "Live: rear".to_string();
+                return Some(Request::Live("rear"));
             }
             Press::BluetoothOn => {
                 self.message = "Turning on...".to_string();
@@ -570,11 +622,19 @@ impl Ui {
             })
             .collect(),
             Page::Console => self.console_buttons(),
-            Page::Camera => vec![
-                Button::new(split(BOTTOM_ROW, 3, 0), "REAR", Press::Photo("rear")),
-                Button::new(split(BOTTOM_ROW, 3, 1), "FRONT", Press::Photo("front")),
-                Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home),
-            ],
+            Page::Camera => {
+                let mut live = Button::new(split(BOTTOM_ROW, 4, 2), "LIVE", Press::ToggleLive);
+                if self.live.is_some() {
+                    live.label = "STOP".to_string();
+                    live.color = DANGER;
+                }
+                vec![
+                    Button::new(split(BOTTOM_ROW, 4, 0), "REAR", Press::Photo("rear")),
+                    Button::new(split(BOTTOM_ROW, 4, 1), "FRONT", Press::Photo("front")),
+                    live,
+                    Button::new(split(BOTTOM_ROW, 4, 3), "BACK", Press::Home),
+                ]
+            }
             Page::Power => vec![
                 Button::new(FIRST_ACTION, "RESTART", Press::AskRestart),
                 Button::new(SECOND_ACTION, "POWER OFF", Press::AskPowerOff)
@@ -834,12 +894,16 @@ impl Ui {
                         let y = PHOTO_AREA.y + PHOTO_AREA.height.saturating_sub(height) / 2;
                         canvas.draw_rgb(x, y, width, height, &image.data);
                     }
+                    None if self.live.is_some() => {
+                        canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, "Starting the camera...", FOREGROUND);
+                    }
                     None => {
                         canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, "Tap REAR or FRONT", FOREGROUND);
-                        canvas.draw_text(MARGIN, 240, TEXT_MEDIUM, "to take a photo.", FOREGROUND);
-                        canvas.draw_text(MARGIN, 300, TEXT_SMALL, "It is not saved, and it is", MUTED);
-                        canvas.draw_text(MARGIN, 326, TEXT_SMALL, "cleared when the screen", MUTED);
-                        canvas.draw_text(MARGIN, 352, TEXT_SMALL, "turns off.", MUTED);
+                        canvas.draw_text(MARGIN, 240, TEXT_MEDIUM, "to take a photo, or", FOREGROUND);
+                        canvas.draw_text(MARGIN, 280, TEXT_MEDIUM, "LIVE for video.", FOREGROUND);
+                        canvas.draw_text(MARGIN, 340, TEXT_SMALL, "Nothing is saved, and the", MUTED);
+                        canvas.draw_text(MARGIN, 366, TEXT_SMALL, "image is cleared when the", MUTED);
+                        canvas.draw_text(MARGIN, 392, TEXT_SMALL, "screen turns off.", MUTED);
                     }
                 }
             }
@@ -1391,6 +1455,51 @@ mod tests {
         ui.reset();
         assert!(ui.photo.is_none());
         assert_eq!(ui.page, Page::Home);
+    }
+
+    #[test]
+    fn camera_page_shows_live_video_until_stopped_or_left() {
+        use crate::display::tests::rgba8888;
+        let frame = photo::Rgb { width: 486, height: 648, data: vec![90; 486 * 648 * 3] };
+        let mut ui = Ui { page: Page::Camera, ..Ui::default() };
+        assert!(matches!(tap_button(&mut ui, Press::ToggleLive), Some(Request::Live("rear"))));
+        assert_eq!(ui.live, Some("rear"));
+        let mut canvas = Canvas::new(rgba8888());
+        ui.render(&mut canvas, &Snapshot::default());
+        ui.show_live(&frame);
+        assert_eq!(ui.photo.as_ref().map(|image| (image.width, image.height)), Some((480, 640)));
+        ui.render(&mut canvas, &Snapshot::default());
+
+        // REAR and FRONT switch cameras, and the same camera again does nothing.
+        assert!(matches!(tap_button(&mut ui, Press::Photo("front")), Some(Request::Live("front"))));
+        assert!(ui.photo.is_none(), "a frame from the other camera must not stay");
+        assert!(tap_button(&mut ui, Press::Photo("front")).is_none());
+        assert!(matches!(tap_button(&mut ui, Press::ToggleLive), Some(Request::StopLive)));
+        assert_eq!(ui.live, None);
+        // A frame sent before the stop arrives after it and is not shown.
+        ui.show_live(&frame);
+        assert!(ui.photo.is_none());
+        // Stopped, REAR takes a photo again.
+        assert!(matches!(tap_button(&mut ui, Press::Photo("rear")), Some(Request::Photo("rear"))));
+
+        // Leaving the page stops it.
+        tap_button(&mut ui, Press::ToggleLive);
+        assert!(matches!(tap_button(&mut ui, Press::Home), Some(Request::StopLive)));
+        assert_eq!((ui.page, ui.live), (Page::Home, None));
+
+        // Stopping on its own leaves the last frame and says why.
+        ui.page = Page::Camera;
+        tap_button(&mut ui, Press::ToggleLive);
+        ui.show_live(&frame);
+        ui.live_ended("Live video ended after 3 min".to_string());
+        assert_eq!(ui.live, None);
+        assert!(ui.photo.is_some());
+        assert!(tap_button(&mut ui, Press::Home).is_none());
+
+        tap_button(&mut ui, Press::OpenCamera);
+        tap_button(&mut ui, Press::ToggleLive);
+        ui.reset();
+        assert_eq!(ui.live, None);
     }
 
     #[test]

@@ -516,7 +516,7 @@ the phone off. Without USB it stays off until the key starts it again.
 The screen is a panel, drawn by the init with no other graphics software. The home page
 shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
 power off the phone, scan for and join a WPA2 network with an on-screen keyboard, and turn
-the BLE scan on or off, take photos, and give a Linux shell. The Bluetooth page shows the
+the BLE scan on or off, take photos, show live video, and give a Linux shell. The Bluetooth page shows the
 scan's state, up to 4 sensors with their values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
 because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
@@ -910,6 +910,24 @@ conversion and the float arithmetic per quad took the time, not the network
 (sending is 1-4 ms per frame). Rear photos went from 1.7 s to 1.4 s. This image
 then booted from flash, kept the password and streamed the front camera at 10 fps
 within 30 s of starting.
+
+The panel's CAMERA page has REAR, FRONT, LIVE and BACK. LIVE shows the rear camera's
+live video on the screen; during it REAR and FRONT switch cameras, and the button
+reads STOP. The same camera thread fills a one-frame slot, which the panel empties
+when it draws, so a slow panel skips frames instead of falling behind. The view stops
+on STOP, BACK, when the screen turns off, or after 3 minutes; frames keep the screen
+on until then. It shares the one camera with the web, so a view running on either
+makes the other fail as busy.
+
+Tested from a RAM boot with `ui tap`, screenshots and the log: the rear and front
+views, switching between them, BACK stopping the view, and the 3 minute limit, after
+which the screen, still on, kept the last frame and said the view had ended. The
+camera delivered 14.4-14.8 fps (rear) and 12.8 fps (front), and the panel drew
+8.1-8.3 and 6.9 fps of them; which
+part of fitting the frame to 480x640 and redrawing the page limits it was not
+measured. The first build never
+drew a frame, because the panel loop handled every queued event before drawing and
+live frames kept arriving; it now handles only what was queued when it woke.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
