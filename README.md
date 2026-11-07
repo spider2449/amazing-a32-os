@@ -642,8 +642,9 @@ terminal; the user dragged windows, switched desktops and opened the right-butto
 Exit with OK returned to the panel with the X server, JWM and xterm ended; killing the X
 server returned to the panel too; and a second start worked. `ui drag` cannot move a
 window, because it sends all of its points at once, and JWM reads the pointer's position
-when the button goes down, by which time the pointer is already at the end. There is no
-on-screen keyboard on the desktop yet.
+when the button goes down, by which time the pointer is already at the end. Then flashed:
+the phone booted from it, and with `ui tap` the desktop started and the JWM menu opened a
+terminal. There is no on-screen keyboard on the desktop yet.
 
 ## Wi-Fi
 
