@@ -648,7 +648,8 @@ The time zone, checked on RAM boots: set to UTC+8 on the page, `alpine date` rea
 file. On the desktop the tray clock showed `07:51 PM` and its date `19:51:34`; a tap on it
 opened nothing; an xclock started by hand showed local time with a title bar, and its
 close button ended it. SSH was not checked, because the key on the test computer was
-refused.
+refused. Then flashed: the phone booted from it, read `time-zone=+8` at 10.5 s, and
+`alpine date` showed `+08` time; it joined the network at 29.2 s.
 
 ## Desktop
 
