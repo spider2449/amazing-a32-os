@@ -2,6 +2,7 @@
 //! touches and status text, and returns requests, so it runs on the host in unit tests.
 
 use crate::display::{Canvas, Rect, Rgb, ACCENT, BACKGROUND, FOREGROUND};
+use crate::photo;
 use crate::wifi::{self, Credentials, Network};
 
 const PANEL: Rgb = Rgb(28, 38, 54);
@@ -39,6 +40,8 @@ const SENSOR_ROW_STEP: u32 = 72;
 const SENSOR_ROW_HEIGHT: u32 = 58;
 // Below every sensor row, so that a double tap on a row cannot confirm removing it.
 const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
+/// Where the camera page shows its photo: a 3:4 portrait photo fills it.
+const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
 
 const LOWER: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const UPPER: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
@@ -89,6 +92,8 @@ pub enum Request {
     /// Saves or removes a sensor, by its address as text.
     AddSensor(String),
     RemoveSensor(String),
+    /// Takes a photo with the named camera, "rear" or "front".
+    Photo(&'static str),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -122,6 +127,7 @@ enum Page {
     Bluetooth,
     AddSensor,
     ConfirmRemoveSensor,
+    Camera,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -152,6 +158,8 @@ enum Press {
     PickSaved(usize),
     PickCandidate(usize),
     RemoveSensor,
+    OpenCamera,
+    Photo(&'static str),
 }
 
 struct Button {
@@ -202,6 +210,8 @@ pub struct Ui {
     candidates: Vec<SensorRow>,
     /// The address of the sensor being removed.
     sensor_target: Option<String>,
+    /// The last photo, already sized for the camera page.
+    photo: Option<photo::Rgb>,
 }
 
 impl Default for Ui {
@@ -220,6 +230,7 @@ impl Default for Ui {
             saved: Vec::new(),
             candidates: Vec::new(),
             sensor_target: None,
+            photo: None,
         }
     }
 }
@@ -239,6 +250,11 @@ impl Ui {
         self.message = message;
     }
 
+    /// Shows a photo on the camera page, made smaller to fit it.
+    pub fn set_photo(&mut self, image: &photo::Rgb) {
+        self.photo = Some(photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize));
+    }
+
     /// Back to the home page, without anything typed. Used when the screen turns off,
     /// so that a passphrase does not stay on the panel.
     pub fn reset(&mut self) {
@@ -246,6 +262,8 @@ impl Ui {
         self.pressed = None;
         self.finger_down = false;
         self.sensor_target = None;
+        // A photo should not wait on a dark screen for the next person to wake it.
+        self.photo = None;
         self.clear_typed();
     }
 
@@ -304,6 +322,11 @@ impl Ui {
             }
             Press::OpenPower => self.page = Page::Power,
             Press::OpenBluetooth => self.page = Page::Bluetooth,
+            Press::OpenCamera => self.page = Page::Camera,
+            Press::Photo(camera) => {
+                self.message = "Taking a photo...".to_string();
+                return Some(Request::Photo(camera));
+            }
             Press::BluetoothOn => {
                 self.message = "Turning on...".to_string();
                 return Some(Request::Bluetooth(true));
@@ -413,11 +436,17 @@ impl Ui {
     fn buttons(&self) -> Vec<Button> {
         match self.page {
             Page::Home => vec![
-                Button::new(split(BOTTOM_ROW, 3, 0), "WI-FI", Press::OpenNetworks),
-                // Smaller, because nine letters at the normal size are wider than a third of
-                // the screen.
-                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 3, 1), "BLUETOOTH", Press::OpenBluetooth) },
-                Button::new(split(BOTTOM_ROW, 3, 2), "POWER", Press::OpenPower),
+                Button::new(split(BOTTOM_ROW, 4, 0), "WI-FI", Press::OpenNetworks),
+                // Smaller, because these labels at the normal size are wider than a
+                // quarter of the screen.
+                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 4, 1), "BLUETOOTH", Press::OpenBluetooth) },
+                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 4, 2), "CAMERA", Press::OpenCamera) },
+                Button::new(split(BOTTOM_ROW, 4, 3), "POWER", Press::OpenPower),
+            ],
+            Page::Camera => vec![
+                Button::new(split(BOTTOM_ROW, 3, 0), "REAR", Press::Photo("rear")),
+                Button::new(split(BOTTOM_ROW, 3, 1), "FRONT", Press::Photo("front")),
+                Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home),
             ],
             Page::Power => vec![
                 Button::new(FIRST_ACTION, "RESTART", Press::AskRestart),
@@ -619,6 +648,24 @@ impl Ui {
                 canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, address, FOREGROUND);
                 canvas.draw_text(MARGIN, 260, TEXT_MEDIUM, "It is no longer shown", FOREGROUND);
                 canvas.draw_text(MARGIN, 300, TEXT_MEDIUM, "or recorded.", FOREGROUND);
+            }
+            Page::Camera => {
+                title(canvas, "CAMERA");
+                match &self.photo {
+                    Some(image) => {
+                        let (width, height) = (image.width as u32, image.height as u32);
+                        let x = PHOTO_AREA.x + PHOTO_AREA.width.saturating_sub(width) / 2;
+                        let y = PHOTO_AREA.y + PHOTO_AREA.height.saturating_sub(height) / 2;
+                        canvas.draw_rgb(x, y, width, height, &image.data);
+                    }
+                    None => {
+                        canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, "Tap REAR or FRONT", FOREGROUND);
+                        canvas.draw_text(MARGIN, 240, TEXT_MEDIUM, "to take a photo.", FOREGROUND);
+                        canvas.draw_text(MARGIN, 300, TEXT_SMALL, "It is not saved, and it is", MUTED);
+                        canvas.draw_text(MARGIN, 326, TEXT_SMALL, "cleared when the screen", MUTED);
+                        canvas.draw_text(MARGIN, 352, TEXT_SMALL, "turns off.", MUTED);
+                    }
+                }
             }
         }
         for button in self.buttons() {
@@ -875,8 +922,8 @@ mod tests {
         assert_eq!(ui.press_at((4, (NETWORK_ROW_TOP + 5) as i32)), None);
 
         let ui = Ui::default();
-        for index in 0..2 {
-            let left = split(BOTTOM_ROW, 3, index);
+        for index in 0..3 {
+            let left = split(BOTTOM_ROW, 4, index);
             let gap = left.x + left.width + BUTTON_GAP / 2;
             assert_eq!(ui.press_at((gap as i32, (BOTTOM_ROW.y + 5) as i32)), None);
         }
@@ -1000,6 +1047,7 @@ mod tests {
             Page::Bluetooth,
             Page::AddSensor,
             Page::ConfirmRemoveSensor,
+            Page::Camera,
         ]
         .map(|page| (page, Layer::Lower))
         .to_vec();
@@ -1012,7 +1060,8 @@ mod tests {
                 !matches!(button.press, Press::Pick(_) | Press::PickSaved(_) | Press::PickCandidate(_))
             });
             for button in fixed {
-                let width = button.label.chars().count() as u32 * CHAR_WIDTH * button.scale;
+                // The last character's blank column is not drawn, so it may reach the edge.
+                let width = (button.label.chars().count() as u32 * CHAR_WIDTH - 1) * button.scale;
                 assert!(width <= button.area.width, "{page:?}: {:?} is {width} px in {} px", button.label, button.area.width);
             }
         }
@@ -1037,6 +1086,7 @@ mod tests {
             Page::Bluetooth,
             Page::AddSensor,
             Page::ConfirmRemoveSensor,
+            Page::Camera,
         ] {
             ui.page = page;
             ui.typed = "x".repeat(PASSPHRASE_LIMIT);
@@ -1117,6 +1167,25 @@ mod tests {
         let rows: Vec<Rect> = ui.buttons().iter().filter(|button| matches!(button.press, Press::PickSaved(_))).map(|button| button.area).collect();
         assert_eq!(rows.len(), SENSOR_ROWS);
         assert!(rows.iter().all(|row| !row.overlaps(REMOVE_ACTION)), "a double tap on a row must not confirm");
+    }
+
+    #[test]
+    fn camera_page_takes_photos_and_forgets_them() {
+        use crate::display::tests::rgba8888;
+        let mut ui = Ui::default();
+        assert!(tap_button(&mut ui, Press::OpenCamera).is_none());
+        assert_eq!(ui.page, Page::Camera);
+        assert!(matches!(tap_button(&mut ui, Press::Photo("rear")), Some(Request::Photo("rear"))));
+        assert_eq!(ui.message, "Taking a photo...");
+        assert!(matches!(tap_button(&mut ui, Press::Photo("front")), Some(Request::Photo("front"))));
+        ui.set_photo(&photo::Rgb { width: 972, height: 1296, data: vec![128; 972 * 1296 * 3] });
+        let shown = ui.photo.as_ref().map(|image| (image.width, image.height));
+        assert_eq!(shown, Some((480, 640)));
+        let mut canvas = Canvas::new(rgba8888());
+        ui.render(&mut canvas, &Snapshot::default());
+        ui.reset();
+        assert!(ui.photo.is_none());
+        assert_eq!(ui.page, Page::Home);
     }
 
     #[test]

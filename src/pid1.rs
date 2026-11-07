@@ -17,7 +17,9 @@ use crate::sensors;
 use crate::charging::{self, Event as PowerEvent};
 use crate::dhcp::{self, MessageType};
 use crate::display::Canvas;
+use crate::camera;
 use crate::fb::Framebuffer;
+use crate::photo;
 use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::sntp;
@@ -303,6 +305,8 @@ enum PanelInput {
     Touch(Option<(i32, i32)>),
     Networks(Vec<wifi::Network>),
     Message(String),
+    /// A photo for the camera page.
+    Photo(photo::Rgb),
 }
 
 /// Where `ui tap` sends its touches, set once the panel is running.
@@ -600,6 +604,11 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
             drop(state);
             web::response("200 OK", "application/json", &body)
         }
+        // Takes a second or two, during which other requests wait.
+        Route::Photo(camera) => match take_photo(camera) {
+            Ok(photo) => web::response_bytes("200 OK", "image/jpeg", &photo.jpeg),
+            Err(err) => web::response("503 Service Unavailable", plain, &format!("camera: {err}\n")),
+        },
         Route::NotFound => web::response("404 Not Found", plain, "not found\n"),
         Route::MethodNotAllowed => web::response("405 Method Not Allowed", plain, "only GET\n"),
         Route::BadRequest => web::response("400 Bad Request", plain, "bad request\n"),
@@ -1059,6 +1068,10 @@ fn run_status_screen() -> io::Result<()> {
                         }
                     }
                     PanelInput::Networks(networks) => panel.set_networks(networks),
+                    PanelInput::Photo(image) => {
+                        last_use = Instant::now();
+                        panel.set_photo(&image);
+                    }
                     PanelInput::Message(message) => {
                         last_use = Instant::now();
                         panel.set_message(message);
@@ -1278,6 +1291,13 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
             Request::RemoveSensor(address) => match change_saved_sensor(false, &address) {
                 Ok(text) => say(text),
                 Err(err) => say(format!("Not removed: {err}")),
+            },
+            Request::Photo(camera) => match take_photo(camera) {
+                Ok(photo) => {
+                    say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));
+                    let _ = replies.send(PanelInput::Photo(photo.image));
+                }
+                Err(err) => say(format!("Photo failed: {err}")),
             },
             Request::Bluetooth(on) => match KernelPlatform.bluetooth(Some(on)) {
                 Ok(report) => say(report.lines().next().unwrap_or_default().to_string()),
@@ -2199,6 +2219,14 @@ impl Platform for KernelPlatform {
         change_saved_sensor(add, address)
     }
 
+    fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
+        // Like `recv`, never replace an existing file.
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let photo = take_photo(camera)?;
+        file.write_all(&photo.jpeg)?;
+        Ok(format!("{}, saved to {path}", describe_photo(camera, &photo)))
+    }
+
     fn power_off(&self) -> io::Error {
         // SAFETY: `sync` takes no arguments and has no memory safety requirements.
         unsafe { sync() };
@@ -2206,6 +2234,40 @@ impl Platform for KernelPlatform {
         unsafe { syscall(SYS_REBOOT, REBOOT_MAGIC1, REBOOT_MAGIC2, REBOOT_CMD_POWER_OFF, 0) };
         io::Error::last_os_error()
     }
+}
+
+/// JPEG quality for photos. At 85 a rear photo took 47 KB to 660 KB in tests; noise
+/// from high gain in dim light makes it larger.
+const PHOTO_QUALITY: u32 = 85;
+
+/// Takes a photo with the named camera ("rear" or "front") and logs the result.
+fn take_photo(name: &str) -> io::Result<camera::Photo> {
+    let camera = camera::by_name(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("no camera named {name}")))?;
+    match camera::take(camera, PHOTO_QUALITY) {
+        Ok(photo) => {
+            log(&format!("camera: {}", describe_photo(name, &photo)));
+            Ok(photo)
+        }
+        Err(err) => {
+            log(&format!("camera: {name} photo failed: {err}"));
+            Err(err)
+        }
+    }
+}
+
+fn describe_photo(name: &str, photo: &camera::Photo) -> String {
+    format!(
+        "{name} photo {}x{}, {} bytes, shutter {} lines, gain {:.2}x, level {:.0}, {} frames in {} ms",
+        photo.width,
+        photo.height,
+        photo.jpeg.len(),
+        photo.exposure.shutter,
+        photo.exposure.gain as f32 / photo::UNIT_GAIN as f32,
+        photo.mean_level,
+        photo.frames,
+        photo.elapsed.as_millis()
+    )
 }
 
 /// Runs the stock `ip` program with its output discarded.
@@ -2383,7 +2445,7 @@ fn make_partition_devices() -> io::Result<()> {
     Ok(())
 }
 
-fn make_char_device(path: &str, major: u32, minor: u32, perm: c_uint) -> io::Result<()> {
+pub(crate) fn make_char_device(path: &str, major: u32, minor: u32, perm: c_uint) -> io::Result<()> {
     make_device(path, S_IFCHR | perm, major, minor)
 }
 

@@ -176,6 +176,21 @@ impl Canvas {
         self.draw_text(x, y, scale, text, color);
     }
 
+    /// Draws an image given as 8-bit RGB triples, rows top to bottom, clipped to the frame.
+    pub fn draw_rgb(&mut self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
+        let bytes = self.format.bytes_per_pixel() as usize;
+        let stride = self.format.stride as usize;
+        for row in 0..height.min(self.format.height.saturating_sub(y)) {
+            for column in 0..width.min(self.format.width.saturating_sub(x)) {
+                let at = ((row * width + column) * 3) as usize;
+                let Some(pixel) = data.get(at..at + 3) else { return };
+                let encoded = self.format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
+                let target = (y + row) as usize * stride + (x + column) as usize * bytes;
+                self.pixels[target..target + bytes].copy_from_slice(&encoded[..bytes]);
+            }
+        }
+    }
+
     pub fn draw_text(&mut self, x: u32, y: u32, scale: u32, text: &str, color: Rgb) {
         for (index, character) in text.chars().enumerate() {
             let left = x + index as u32 * (GLYPH_ADVANCE * scale);

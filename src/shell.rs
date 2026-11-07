@@ -36,6 +36,7 @@ const HELP: &str = "commands:
   ui tap X Y                   act as if the screen were touched there
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
+  camera rear|front NEW_FILE    take a photo and save it as a JPEG
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -68,6 +69,9 @@ pub trait Platform {
     fn bluetooth(&self, switch: Option<bool>) -> io::Result<String>;
     /// Saves or removes a BLE sensor, by its address as text.
     fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String>;
+    /// Takes a photo with the rear or front camera, saves it as a JPEG and
+    /// describes it.
+    fn photo(&self, camera: &str, path: &str) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -138,6 +142,9 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         }
         ["bluetooth", "remove", address] => {
             platform.bluetooth_sensor(false, address).and_then(|text| writeln!(out, "{text}"))
+        }
+        ["camera", camera @ ("rear" | "front"), path] => {
+            platform.photo(camera, path).and_then(|text| writeln!(out, "{text}"))
         }
         ["tcp", address] => try_tcp(address, out),
         ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
@@ -261,6 +268,10 @@ mod tests {
         fn dhcp(&self, interface: &str) -> io::Result<String> {
             Ok(format!("lease on {interface}"))
         }
+
+        fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
+            Ok(format!("photo {camera} {path}"))
+        }
     }
 
     fn session(input: &str) -> (String, Vec<Option<String>>) {
@@ -322,6 +333,18 @@ mod tests {
         assert!(session("bluetooth add 58:2d:34:36:74:93\n").0.contains("sensor add=true 58:2d:34:36:74:93"));
         assert!(session("bluetooth remove 58:2d:34:36:74:93\n").0.contains("sensor add=false 58:2d:34:36:74:93"));
         assert!(session("bluetooth add\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn camera_takes_a_side_and_a_file() {
+        assert!(session("camera rear /data/a.jpg
+").0.contains("photo rear /data/a.jpg"));
+        assert!(session("camera front /data/b.jpg
+").0.contains("photo front /data/b.jpg"));
+        assert!(session("camera back /data/a.jpg
+").0.contains("unknown command"));
+        assert!(session("camera rear
+").0.contains("unknown command"));
     }
 
     #[test]

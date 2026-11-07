@@ -852,3 +852,34 @@ without USB.
 
 To leave charger mode if the console is missing, unplug USB, which turns the phone
 off, press the power key with USB unplugged, then plug USB back in.
+
+## Cameras
+
+Rear GC5025 (2592x1944) and front GC2385 (1600x1200) take photos without Android's
+camera stack: `camera rear|front NEW_FILE` on the console, `/camera/rear.jpg` and
+`/camera/front.jpg` on the status page, and a CAMERA page on the panel. Photos are
+half the sensor size (each 2x2 Bayer quad becomes one pixel), turned to the stock
+camera's portrait orientation, with auto exposure, gray-world white balance and a
+baseline JPEG encoder (`src/photo.rs`). The status page has no login, so anyone who
+can reach it can take a photo.
+
+How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
+
+- Sensor: kd_camera_hw set driver, then `0xC0046946` (set current sensor), without
+  which open silently does nothing; open, preview scenario, shutter (feature 3004)
+  and gain (3006, 64 = 1x).
+- Seninf and MIPI: the stock HAL's NCSI2 setup (`libcam.halsensor.so`), rear on
+  seninf 1/CSI0 with two lanes, front on seninf 2/CSI1 with one lane, mux 0 to TG1.
+- ISP pass 1: `ISP_RESET`, then CAM register values read from the hardware while
+  stock Android previewed (`src/camera_regs.rs`), IMGO into an ION buffer (heap
+  0x400, M4U port 15), statistics modules off (with them on the pass stalls after
+  about 20 lines). Frames are RAW10 packed least significant bit first, R first.
+
+The register values came from a RAM-booted stock image with a patched ramdisk:
+every SELinux domain permissive (`scripts/camera/sepolicy-permissive.py`) and a
+root helper (`scripts/camera/camroot.sh`). Never flash such an image. The stock
+camera then needed `setprop debug.lsc_mgr.enable 0` and `/data/nvram/media`,
+because this phone's `/data` was wiped. Experiments are in `scripts/camera/`.
+
+Tested from a RAM boot: rear photo 1.6-1.8 s, front 0.8 s; photos 47-690 KB.
+Front orientation is not yet checked against a known scene.

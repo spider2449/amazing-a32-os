@@ -5,6 +5,10 @@
 
 #[cfg(target_os = "linux")]
 mod alpine;
+#[cfg(target_os = "linux")]
+mod camera;
+#[cfg(target_os = "linux")]
+mod camera_regs;
 #[cfg(any(target_os = "linux", test))]
 mod bench;
 #[cfg(any(target_os = "linux", test))]
@@ -14,6 +18,8 @@ mod identify;
 #[cfg(any(target_os = "linux", test))]
 mod charging;
 mod probe;
+#[cfg(any(target_os = "linux", test))]
+mod photo;
 #[cfg(any(target_os = "linux", test))]
 mod properties;
 
