@@ -881,5 +881,6 @@ root helper (`scripts/camera/camroot.sh`). Never flash such an image. The stock
 camera then needed `setprop debug.lsc_mgr.enable 0` and `/data/nvram/media`,
 because this phone's `/data` was wiped. Experiments are in `scripts/camera/`.
 
-Tested from a RAM boot: rear photo 1.6-1.8 s, front 0.8 s; photos 47-690 KB.
+Tested from a RAM boot: rear photo 1.6-1.8 s, front 0.8 s; photos 47-690 KB. The same
+image then booted from flash, joined Wi-Fi and served a front photo in about 1 s.
 Front orientation is not yet checked against a known scene.
