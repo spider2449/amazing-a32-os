@@ -515,7 +515,7 @@ the phone off. Without USB it stays off until the key starts it again.
 
 The screen is a panel, drawn by the init with no other graphics software. The home page
 shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
-power off the phone, scan for and join a WPA2 network with an on-screen keyboard, and turn
+power off the phone, change settings, scan for and join a WPA2 network with an on-screen keyboard, and turn
 the BLE scan on or off, take photos, show live video, and give a Linux shell. The Bluetooth page shows the
 scan's state, up to 4 sensors with their values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
 because neither loses anything, and the page notes that scanning slows Wi-Fi.
@@ -537,13 +537,13 @@ The Desktop page shows why the last desktop ended, here because the window manag
 stopped from the console.
 
 A button acts when the finger lifts over it, and only if the finger came down on it. The
-screen turns off 60 seconds after the last use and drops anything typed. A touch or the
+screen turns off 60 seconds after the last use, or as set (see Settings), and drops anything typed. A touch or the
 power key turns it on, and that first touch presses nothing. Holding the power key for 3
 seconds powers off, as before. The RESTART and POWER OFF buttons were each tested once with
 `ui tap`, with USB attached: the phone left and returned, and after a power off it rejoined
 the network.
 
-The home page's buttons are WI-FI, BLE, CAMERA, CONSOLE and POWER, in small letters
+The home page's buttons are WI-FI, BLE, CAMERA, CONSOLE and SYSTEM (RESTART, POWER OFF and SETTINGS), in small letters
 so that five fit, and DESKTOP beside the title, for the X11 desktop (see Desktop). CONSOLE is a terminal with Alpine's login shell (`/bin/sh -l` in the
 chroot, as root, `TERM=vt100`) on a pseudo-terminal, 39 columns wide. The init's own
 commands stay on the USB serial console. The page has a small terminal emulator
@@ -607,6 +607,33 @@ fast as 2.8 ms. Other old devices may have the same problem.
 `/dev/touch` was missing on one early boot. Later boots found it each time, and
 `/run/init.log` keeps the reason if it happens again.
 
+### Settings
+
+SYSTEM, then SETTINGS, opens a page where each setting has two buttons. A change applies
+at once and is kept in `/data/a32/settings`, as `name=value` lines that can also be
+edited by hand. The init reads the file when `/data` mounts, a few seconds after the
+panel starts, so the first seconds after a start use the defaults. A missing file, an
+unknown line or a value that is not offered leaves that setting at its default. If
+`/data` is not mounted, a change still applies and the page says it was not kept.
+
+| Setting | Choices | Default | File line |
+|---|---|---|---|
+| Screen off after | 15 s, 30 s, 1, 2, 5, 10 or 30 min, never | 1 min | `screen-off=60` (seconds, or `never`) |
+| Brightness | 6%, 13%, 25%, 50%, 75%, 100% | 25% | `brightness=64` (out of 255) |
+| Touch wakes the screen | on, off. Off leaves only the power key | on | `touch-wakes=on` |
+| Desktop right click hold | 0.8, 1, 1.5, 2, 2.5 s | 1.5 s | `right-click-hold=1500` (ms) |
+
+The defaults are the values used before the page existed. With `never` the panel is
+drawn every second, which raised idle CPU use from about 1.4% to 12% when measured (see
+Tuning), so the page says so. The hold time takes effect when the desktop next starts.
+
+Checked on RAM boots with `ui tap`, screenshots and the log: each change applied and was
+saved at once, and a step past the end of a range saved nothing. At 15 s the backlight
+read 0 after 20 s and a touch brought it back at 50% (`128`). With touch waking off, a
+tap left it at 0. After a restart the init read the file 0.01 s after `/data` mounted
+and set the backlight to 128, and a file changed by hand to 5 min with touch waking on
+showed on the page as it was. Not flashed yet.
+
 ## Desktop
 
 The panel's DESKTOP page starts an X11 desktop: the X server on `fb0` with the JWM window
@@ -642,7 +669,8 @@ Found on this phone, and worth checking the same way on other old devices:
 Touches become mouse events in `src/input.rs`. A tap clicks the left button where the
 finger was. A finger that moves more than 20 pixels drags with the left button from where
 it came down; a held finger drifted about 6 pixels. A finger held still for 1.5 seconds
-clicks the right button. The user tried 0.7, 1, 2 and 1.5 seconds by hand and chose 1.5.
+clicks the right button. The user tried 0.7, 1, 2 and 1.5 seconds by hand and chose 1.5,
+which is the default; the settings page offers 0.8 to 2.5 seconds.
 
 The on-screen keyboard is `svkbd`, from suckless, made for phones. Alpine has no `xvkbd`.
 It starts with the desktop, 300 pixels high, above JWM's tray, and the KB button in the

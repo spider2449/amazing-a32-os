@@ -24,6 +24,7 @@ use crate::photo;
 use crate::input::{self, Action, Gesture, PowerKey, Touch, EVENT_LEN};
 use crate::pointer::Pointer;
 use crate::shell::{self, Platform};
+use crate::settings::Settings;
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
 use crate::ui::{self, Request, SensorRow, Snapshot, Ui};
@@ -327,6 +328,8 @@ enum PanelInput {
     /// The desktop has the screen now, and later gave it back, with why.
     DesktopStarted,
     DesktopEnded(String),
+    /// Settings read from /data, which mounts after the panel starts.
+    Settings(Settings),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -617,11 +620,11 @@ const FB_SYSFS_DEV: &str = "/sys/class/graphics/fb0/dev";
 const FB_DEVICE: &str = "/dev/fb0";
 const DISPLAY_INFO: &str = "/run/display-info";
 const BACKLIGHT: &str = "/sys/class/leds/lcd-backlight/brightness";
-// A low level, because the screen stays on for the whole session.
-const BACKLIGHT_LEVEL: &str = "64";
-// Drawing the whole screen each second took much of the idle CPU time, so the screen
-// turns off when nobody is using it.
-const SCREEN_TIMEOUT: Duration = Duration::from_secs(60);
+// The panel's settings, such as how long the screen stays on and how bright it is.
+const SETTINGS_FILE: &str = "/data/a32/settings";
+// Drawing the whole screen each second took much of the idle CPU time, so by default
+// the screen turns off a minute after the last use. Read from /data after it mounts.
+static SETTINGS: Mutex<Settings> = Mutex::new(Settings::DEFAULT);
 const BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
 const BATTERY_STATUS: &str = "/sys/class/power_supply/battery/status";
 const BATTERY_MILLIVOLTS: &str = "/sys/class/power_supply/battery/batt_vol";
@@ -1407,7 +1410,7 @@ fn run_status_screen() -> io::Result<()> {
     let mut framebuffer = Framebuffer::open(FB_DEVICE)?;
     let format = framebuffer.format();
     let unblank = framebuffer.unblank();
-    let backlight = fs::write(BACKLIGHT, BACKLIGHT_LEVEL);
+    let backlight = fs::write(BACKLIGHT, settings().backlight());
     let info = format!("{format:?}\nunblank: {unblank:?}\nbacklight: {backlight:?}\n");
     log(&info);
     let _ = fs::write(DISPLAY_INFO, info);
@@ -1430,6 +1433,9 @@ fn run_status_screen() -> io::Result<()> {
 
     let mut canvas = Canvas::new(format);
     let mut panel = Ui::default();
+    // After `PANEL_INPUT` is set, so that settings read from /data reach the panel
+    // either here or as a message.
+    panel.set_settings(settings());
     let mut shell: Option<ConsoleShell> = None;
     let mut live: Option<LiveView> = None;
     let mut live_count = 0u32;
@@ -1440,7 +1446,7 @@ fn run_status_screen() -> io::Result<()> {
     // The desktop's mouse, made once and kept, and the touch being turned into it.
     let mut desktop = DesktopMode::Off;
     let mut pointer: Option<Pointer> = None;
-    let mut gesture = Gesture::default();
+    let mut gesture = Gesture::new(settings().right_click_hold());
     let clock = Instant::now();
     loop {
         heartbeat(Service::Panel);
@@ -1457,7 +1463,7 @@ fn run_status_screen() -> io::Result<()> {
             live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
         }
         was_on = on;
-        if on && last_use.elapsed() >= SCREEN_TIMEOUT {
+        if on && settings().screen_timeout().is_some_and(|timeout| last_use.elapsed() >= timeout) {
             set_screen(false);
             panel.reset();
             live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
@@ -1488,6 +1494,11 @@ fn run_status_screen() -> io::Result<()> {
             for event in queued {
                 match event {
                     PanelInput::Touch(position) => {
+                        // With touch waking turned off, only the power key turns
+                        // the screen on, and touches on a dark screen go nowhere.
+                        if !SCREEN_ON.load(Ordering::Acquire) && !settings().touch_wakes() {
+                            continue;
+                        }
                         last_use = Instant::now();
                         if !SCREEN_ON.load(Ordering::Acquire) {
                             set_screen(true);
@@ -1515,6 +1526,11 @@ fn run_status_screen() -> io::Result<()> {
                             Some(request @ (Request::Live(_) | Request::StopLive)) => {
                                 live_request(&mut live, &mut live_count, &mut panel, request, &input);
                             }
+                            // Applied here at once; saving to the eMMC is slow work.
+                            Some(Request::Settings(chosen)) => {
+                                apply_settings(chosen);
+                                let _ = requests.send(Request::Settings(chosen));
+                            }
                             Some(request) => {
                                 let _ = requests.send(request);
                             }
@@ -1524,6 +1540,8 @@ fn run_status_screen() -> io::Result<()> {
                     // Output does not keep the screen on: a program like `top`
                     // would never let it turn off.
                     PanelInput::TerminalOutput(bytes) => panel.terminal_output(&bytes),
+                    // The desktop's hold time is read when the desktop starts.
+                    PanelInput::Settings(loaded) => panel.set_settings(loaded),
                     PanelInput::TerminalEnded => {
                         if let Some(mut ended) = shell.take() {
                             let status = ended.child.wait().map_or_else(|err| err.to_string(), |status| status.to_string());
@@ -1534,12 +1552,12 @@ fn run_status_screen() -> io::Result<()> {
                     PanelInput::DesktopStarted => {
                         log("panel: desktop started");
                         desktop = DesktopMode::On;
-                        gesture = Gesture::default();
+                        gesture = Gesture::new(settings().right_click_hold());
                     }
                     PanelInput::DesktopEnded(message) => {
                         log(&format!("panel: desktop: {message}"));
                         desktop = DesktopMode::Off;
-                        gesture = Gesture::default();
+                        gesture = Gesture::new(settings().right_click_hold());
                         // The X server drew over the panel.
                         framebuffer.forget();
                         last_use = Instant::now();
@@ -1793,6 +1811,11 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
             | Request::Live(_)
             | Request::StopLive
             | Request::StartDesktop => {}
+            Request::Settings(chosen) => {
+                if let Err(err) = save_settings(&chosen) {
+                    say(format!("Applied, not kept: {err}"));
+                }
+            }
             Request::Photo(camera) => match take_photo(camera) {
                 Ok(photo) => {
                     say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));
@@ -1822,9 +1845,51 @@ fn scan_networks() -> io::Result<Vec<wifi::Network>> {
     Ok(wifi::parse_scan_results(&wpa_cli(&["scan_results"])?))
 }
 
+fn settings() -> Settings {
+    *SETTINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Puts settings in use at once: the backlight changes if the screen is on, and
+/// the rest is read where it is needed.
+fn apply_settings(chosen: Settings) {
+    let before = std::mem::replace(&mut *SETTINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), chosen);
+    if before.backlight() != chosen.backlight() && SCREEN_ON.load(Ordering::Acquire) {
+        if let Err(err) = fs::write(BACKLIGHT, chosen.backlight()) {
+            log(&format!("backlight failed: {err}"));
+        }
+    }
+}
+
+fn save_settings(chosen: &Settings) -> io::Result<()> {
+    if !DATA_READY.load(Ordering::Acquire) {
+        return Err(io::Error::other("/data is not mounted"));
+    }
+    write_private_file(SETTINGS_FILE, &chosen.to_text())?;
+    log(&format!("panel: settings kept: {}", chosen.to_text().trim_end().replace('\n', ", ")));
+    Ok(())
+}
+
+/// Reads the settings once /data is mounted, and hands them to the panel. They are
+/// stored before being sent, so a panel that starts later reads them itself.
+fn load_settings() {
+    let loaded = match fs::read_to_string(SETTINGS_FILE) {
+        Ok(text) => Settings::from_text(&text),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+        Err(err) => {
+            log(&format!("settings: not read, using the defaults: {err}"));
+            return;
+        }
+    };
+    apply_settings(loaded);
+    log(&format!("settings: {}", loaded.to_text().trim_end().replace('\n', ", ")));
+    if let Some(panel) = PANEL_INPUT.get() {
+        let _ = panel.send(PanelInput::Settings(loaded));
+    }
+}
+
 fn set_screen(on: bool) {
     SCREEN_ON.store(on, Ordering::Release);
-    let level = if on { BACKLIGHT_LEVEL } else { "0" };
+    let level = if on { settings().backlight() } else { "0".to_string() };
     if let Err(err) = fs::write(BACKLIGHT, level) {
         log(&format!("backlight failed: {err}"));
     }
@@ -1955,6 +2020,7 @@ fn storage_and_network() {
             if let Err(err) = start_persistent_log() {
                 log(&format!("log: not kept across restarts: {err}"));
             }
+            load_settings();
             if let Err(err) = restore_wifi_calibration() {
                 log(&format!("wifi: no calibration from nvdata: {err}"));
             }

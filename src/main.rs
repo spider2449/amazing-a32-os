@@ -44,6 +44,8 @@ mod pid1;
 #[cfg(any(target_os = "linux", test))]
 mod sensors;
 #[cfg(any(target_os = "linux", test))]
+mod settings;
+#[cfg(any(target_os = "linux", test))]
 mod shell;
 #[cfg(any(target_os = "linux", test))]
 mod sntp;

@@ -66,7 +66,8 @@ impl Touch {
     }
 }
 
-/// How long a finger must stay still for the right button, on the desktop.
+/// How long a finger must stay still for the right button, on the desktop, unless
+/// the settings choose another time.
 pub const HOLD_FOR_RIGHT: Duration = Duration::from_millis(1500);
 /// How far a finger may wander, in pixels on each axis, and still count as still.
 /// A finger held down drifted about 6 pixels on this screen.
@@ -99,16 +100,22 @@ enum GestureState {
 /// Turns one finger into a mouse for the desktop. A tap clicks the left button,
 /// a finger that moves drags with it, and a finger held still clicks the right one.
 pub struct Gesture {
+    hold: Duration,
     state: GestureState,
 }
 
 impl Default for Gesture {
     fn default() -> Self {
-        Self { state: GestureState::Up }
+        Self::new(HOLD_FOR_RIGHT)
     }
 }
 
 impl Gesture {
+    /// A finger held still for `hold` clicks the right button.
+    pub fn new(hold: Duration) -> Self {
+        Self { hold, state: GestureState::Up }
+    }
+
     /// Takes the finger's position, or `None` when it lifts. `now` is any clock
     /// that never goes backwards.
     pub fn touch(&mut self, position: Option<(i32, i32)>, now: Duration) -> Vec<PointerEvent> {
@@ -145,7 +152,7 @@ impl Gesture {
     /// Clicks the right button once a finger has been still long enough.
     pub fn tick(&mut self, now: Duration) -> Vec<PointerEvent> {
         match self.state {
-            GestureState::Waiting { start, since } if now.saturating_sub(since) >= HOLD_FOR_RIGHT => {
+            GestureState::Waiting { start, since } if now.saturating_sub(since) >= self.hold => {
                 self.state = GestureState::Held;
                 vec![
                     PointerEvent::Move(start.0, start.1),
@@ -160,7 +167,7 @@ impl Gesture {
     /// How long until `tick` may click, or `None` if no finger is waiting.
     pub fn wait_limit(&self, now: Duration) -> Option<Duration> {
         match self.state {
-            GestureState::Waiting { since, .. } => Some(HOLD_FOR_RIGHT.saturating_sub(now.saturating_sub(since))),
+            GestureState::Waiting { since, .. } => Some(self.hold.saturating_sub(now.saturating_sub(since))),
             _ => None,
         }
     }
@@ -291,6 +298,15 @@ mod tests {
         assert_eq!(gesture.touch(None, millis(1680)), vec![]);
         // The next touch starts afresh.
         assert_eq!(gesture.touch(Some((10, 20)), millis(3000)), vec![Move(10, 20)]);
+    }
+
+    #[test]
+    fn a_chosen_hold_time_is_used() {
+        let mut gesture = Gesture::new(millis(800));
+        gesture.touch(Some((300, 400)), millis(0));
+        assert_eq!(gesture.wait_limit(millis(200)), Some(millis(600)));
+        assert_eq!(gesture.tick(millis(799)), vec![]);
+        assert_eq!(gesture.tick(millis(800)), vec![Move(300, 400), Press(Right), Release(Right)]);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use crate::display::{Canvas, Rect, Rgb, ACCENT, BACKGROUND, FOREGROUND};
 use crate::photo;
+use crate::settings::{Setting, Settings};
 use crate::terminal::{key_bytes, Terminal};
 use crate::wifi::{self, Credentials, Network};
 
@@ -41,6 +42,14 @@ const SENSOR_ROW_STEP: u32 = 72;
 const SENSOR_ROW_HEIGHT: u32 = 58;
 // Below every sensor row, so that a double tap on a row cannot confirm removing it.
 const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
+// On the system page, below the settings page's rows, so that a double tap on it
+// cannot change a setting, and away from the confirm buttons.
+const OPEN_SETTINGS: Rect = Rect { x: 60, y: 640, width: 360, height: 88 };
+// The settings page: one row for each setting, its name and value on the left and
+// two buttons on the right.
+const SETTING_ROW_TOP: u32 = 110;
+const SETTING_ROW_STEP: u32 = 140;
+const SETTING_BUTTONS: Rect = Rect { x: 240, y: 24, width: WIDTH - MARGIN - 240, height: 72 };
 /// Where the camera page shows its photo: a 3:4 portrait photo fills it.
 const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
 const HEIGHT: u32 = 854;
@@ -123,6 +132,8 @@ pub enum Request {
     TerminalInput(Vec<u8>),
     /// Starts the X11 desktop, which takes over the screen until it ends.
     StartDesktop,
+    /// Applies and keeps changed settings.
+    Settings(Settings),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -157,6 +168,7 @@ enum Page {
     Camera,
     Console,
     Desktop,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -202,6 +214,9 @@ enum Press {
     Arrow(u8),
     OpenDesktop,
     StartDesktop,
+    OpenSettings,
+    /// Moves a setting one step, up if true.
+    Change(Setting, bool),
 }
 
 struct Button {
@@ -269,6 +284,7 @@ pub struct Ui {
     control: bool,
     console_scroll: usize,
     drag: Option<(i32, usize)>,
+    settings: Settings,
 }
 
 impl Default for Ui {
@@ -294,6 +310,7 @@ impl Default for Ui {
             control: false,
             console_scroll: 0,
             drag: None,
+            settings: Settings::default(),
         }
     }
 }
@@ -313,6 +330,11 @@ impl Ui {
     pub fn set_sensors(&mut self, saved: Vec<SensorRow>, candidates: Vec<SensorRow>) {
         self.saved = saved;
         self.candidates = candidates;
+    }
+
+    /// Takes the settings in use, such as those read from /data after the start.
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
     }
 
     pub fn set_message(&mut self, message: String) {
@@ -576,6 +598,12 @@ impl Ui {
                 return Some(self.terminal_size());
             }
             Press::OpenDesktop => self.page = Page::Desktop,
+            Press::OpenSettings => self.page = Page::Settings,
+            Press::Change(setting, up) => {
+                if self.settings.step(setting, up) {
+                    return Some(Request::Settings(self.settings));
+                }
+            }
             Press::StartDesktop => {
                 self.message = "Starting the desktop...".to_string();
                 return Some(Request::StartDesktop);
@@ -647,7 +675,7 @@ impl Ui {
                     ("BLE", Press::OpenBluetooth),
                     ("CAMERA", Press::OpenCamera),
                     ("CONSOLE", Press::OpenConsole),
-                    ("POWER", Press::OpenPower),
+                    ("SYSTEM", Press::OpenPower),
                 ]
                 .into_iter()
                 .enumerate()
@@ -681,8 +709,21 @@ impl Ui {
                 Button::new(FIRST_ACTION, "RESTART", Press::AskRestart),
                 Button::new(SECOND_ACTION, "POWER OFF", Press::AskPowerOff)
                     .danger(),
+                Button::new(OPEN_SETTINGS, "SETTINGS", Press::OpenSettings),
                 Button::new(BOTTOM_ROW, "BACK", Press::Home),
             ],
+            Page::Settings => {
+                let mut buttons = Vec::new();
+                for (index, setting) in Setting::ALL.into_iter().enumerate() {
+                    let y = SETTING_ROW_TOP + index as u32 * SETTING_ROW_STEP + SETTING_BUTTONS.y;
+                    let area = Rect { y, ..SETTING_BUTTONS };
+                    let (lower, higher) = setting.buttons();
+                    buttons.push(Button::new(split(area, 2, 0), lower, Press::Change(setting, false)));
+                    buttons.push(Button::new(split(area, 2, 1), higher, Press::Change(setting, true)));
+                }
+                buttons.push(Button::new(BOTTOM_ROW, "BACK", Press::OpenPower));
+                buttons
+            }
             Page::ConfirmRestart => vec![
                 Button::new(CONFIRM_ACTION, "YES, RESTART", Press::Restart)
                     .danger(),
@@ -898,7 +939,8 @@ impl Ui {
         canvas.clear(BACKGROUND);
         match self.page {
             Page::Home => self.render_home(canvas, status),
-            Page::Power => title(canvas, "POWER"),
+            Page::Power => title(canvas, "SYSTEM"),
+            Page::Settings => self.render_settings(canvas),
             Page::ConfirmRestart => {
                 title(canvas, "RESTART?");
                 canvas.draw_text(MARGIN, 200, TEXT_MEDIUM, "SSH will drop for", FOREGROUND);
@@ -935,13 +977,14 @@ impl Ui {
             Page::Console => self.render_console(canvas),
             Page::Desktop => {
                 title(canvas, "DESKTOP");
+                let hold = format!("Hold still {}: right button.", self.settings.value_text(Setting::RightClickHold));
                 let lines = [
                     "X11 with the JWM window",
                     "manager, from Alpine.",
                     "",
                     "Tap: left button.",
                     "Move the finger: drag.",
-                    "Hold still 1.5 s: right button.",
+                    &hold,
                     "KB in the tray: keyboard.",
                     "",
                     "Leave with Exit in the menu",
@@ -1030,6 +1073,25 @@ impl Ui {
                 canvas.draw_text(MARGIN, y + 4, TEXT_SMALL, label, MUTED);
                 canvas.draw_text(100, y, TEXT_MEDIUM, value, FOREGROUND);
             }
+        }
+    }
+
+    fn render_settings(&self, canvas: &mut Canvas) {
+        title(canvas, "SETTINGS");
+        for (index, setting) in Setting::ALL.into_iter().enumerate() {
+            let top = SETTING_ROW_TOP + index as u32 * SETTING_ROW_STEP;
+            canvas.draw_text(MARGIN, top, TEXT_SMALL, setting.label(), MUTED);
+            canvas.draw_text(MARGIN, top + 46, TEXT_MEDIUM, &self.settings.value_text(setting), FOREGROUND);
+        }
+        let notes: &[&str] = if self.settings.screen_timeout().is_none() {
+            &["Never: the screen is drawn every", "second, which keeps the CPU busy."]
+        } else if !self.settings.touch_wakes() {
+            &["Only the power key turns the", "screen on."]
+        } else {
+            &["Changes apply at once and are", "kept on /data."]
+        };
+        for (index, line) in notes.iter().enumerate() {
+            canvas.draw_text(MARGIN, SETTING_ROW_TOP + 4 * SETTING_ROW_STEP + index as u32 * 26, TEXT_SMALL, line, MUTED);
         }
     }
 
@@ -1394,6 +1456,7 @@ mod tests {
             (Page::Bluetooth, Layer::Lower),
             (Page::AddSensor, Layer::Lower),
             (Page::ConfirmRemoveSensor, Layer::Lower),
+            (Page::Settings, Layer::Lower),
         ];
         pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
         pages.extend(keyboards.map(|layer| (Page::Console, layer)));
@@ -1427,6 +1490,7 @@ mod tests {
             Page::AddSensor,
             Page::ConfirmRemoveSensor,
             Page::Camera,
+            Page::Settings,
         ]
         .map(|page| (page, Layer::Lower))
         .to_vec();
@@ -1468,6 +1532,8 @@ mod tests {
             Page::ConfirmRemoveSensor,
             Page::Camera,
             Page::Console,
+            Page::Desktop,
+            Page::Settings,
         ] {
             ui.page = page;
             ui.typed = "x".repeat(PASSPHRASE_LIMIT);
@@ -1747,6 +1813,47 @@ mod tests {
         ui.render(&mut canvas, &Snapshot::default());
         tap_button(&mut ui, Press::Home);
         assert_eq!(ui.page, Page::Home);
+    }
+
+    #[test]
+    fn settings_change_one_step_at_a_time_and_are_sent() {
+        let mut ui = Ui::default();
+        tap_button(&mut ui, Press::OpenPower);
+        tap_button(&mut ui, Press::OpenSettings);
+        assert_eq!(ui.page, Page::Settings);
+        let Some(Request::Settings(chosen)) = tap_button(&mut ui, Press::Change(Setting::ScreenOff, true)) else {
+            panic!("no settings request");
+        };
+        assert_eq!(chosen.value_text(Setting::ScreenOff), "2 min");
+        assert_eq!(ui.settings, chosen);
+        // Already on: nothing to apply or save.
+        assert!(tap_button(&mut ui, Press::Change(Setting::TouchWakes, true)).is_none());
+        assert!(matches!(tap_button(&mut ui, Press::Change(Setting::TouchWakes, false)), Some(Request::Settings(_))));
+        tap_button(&mut ui, Press::OpenPower);
+        assert_eq!(ui.page, Page::Power);
+    }
+
+    #[test]
+    fn the_settings_page_follows_settings_read_later() {
+        let mut ui = Ui::default();
+        let mut loaded = Settings::default();
+        loaded.step(Setting::RightClickHold, true);
+        ui.set_settings(loaded);
+        ui.page = Page::Settings;
+        let Some(Request::Settings(chosen)) = tap_button(&mut ui, Press::Change(Setting::Brightness, true)) else {
+            panic!("no settings request");
+        };
+        // The loaded value is kept when another changes.
+        assert_eq!(chosen.right_click_hold(), loaded.right_click_hold());
+    }
+
+    #[test]
+    fn the_settings_button_is_not_under_a_setting() {
+        let mut ui = Ui::default();
+        ui.page = Page::Settings;
+        let rows: Vec<Rect> = ui.buttons().iter().filter(|button| matches!(button.press, Press::Change(..))).map(|button| button.area).collect();
+        assert_eq!(rows.len(), 8);
+        assert!(rows.iter().all(|area| !area.overlaps(OPEN_SETTINGS)));
     }
 
     #[test]
