@@ -937,7 +937,8 @@ of 11.8-13.6 (front): the camera, not the panel, now sets the rate. The first bu
 drew a frame, because the panel loop handled every queued event before drawing and
 live frames kept arriving; it now handles only what was queued when it woke.
 After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it; with the faster
-fitting, a flashed rear view drew 13.7 fps of 14.2.
+fitting, a flashed rear view drew 13.7 fps of 14.2; with fitting in its own thread, a
+flashed front view drew 14.0 fps of 14.8.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
