@@ -714,7 +714,8 @@ started xterm. Then, with the four optional programs installed, on another RAM b
 tray showed xclock, Applications held Calculator, Browser and Files, and each started;
 NetSurf showed its welcome page and PCManFM the files of `/`. The first tap on JWM, just
 after the desktop started, opened no menu, because the tray waits for xclock; a tap a few
-seconds later did. Not flashed yet.
+seconds later did. Then flashed: the phone booted from it, and with `ui tap` the desktop
+started and Applications held Calculator, Browser and Files.
 
 ## Wi-Fi
 
