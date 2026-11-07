@@ -104,6 +104,36 @@ unpacks it on the computer, because the stock `gzip` could not decompress and `t
 no `gunzip` to call. It sends the `.tar` with `recv`, which has no authentication, then
 reads the file back over the serial console and compares the hash before unpacking.
 
+DHCP can give the phone another address, so give it a name in `~/.ssh/config` and keep
+its host key under that name rather than under an address:
+
+```
+Host a32
+    HostName PHONE_ADDRESS
+    User root
+    IdentityFile ~/.ssh/a32
+    IdentitiesOnly yes
+    HostKeyAlias a32
+```
+
+After the first `ssh a32` saves the key, `scripts/find-phone.ps1` sets `HostName` to the
+current address. It asks over the serial console (`wifi`), or, with no cable or
+`-ScanOnly`, it tries port 22 on every address of this computer's /24 networks and keeps
+the one that shows the host key saved for `a32`. On the test network a scan took 2.6 s
+and passed over another SSH server. It probes with `ssh`, because the
+`ssh-keyscan` that comes with Windows (9.5) cannot agree on a key exchange with
+OpenSSH 10.3.
+
+If the key has a passphrase, scripts and agents that cannot type it get `Permission
+denied (publickey)`, even though `sshd` accepted the key (`ssh -v` shows `Server
+accepts key`). Load it into the Windows agent once; that needs an administrator
+PowerShell for the first line:
+
+```powershell
+Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent
+ssh-add "$env:USERPROFILE\.ssh\a32"
+```
+
 The init names the host `a32`, so shell prompts no longer show the kernel's `(none)`;
 `hostname` read `a32` on a RAM boot and after flashing. SSH takes only keys for root. Test results, from RAM boots of Alpine 3.24.3:
 
@@ -647,8 +677,8 @@ The time zone, checked on RAM boots: set to UTC+8 on the page, `alpine date` rea
 `19:47:12 +08` at 11:47 UTC, and after a restart the init read `time-zone=+8` from the
 file. On the desktop the tray clock showed `07:51 PM` and its date `19:51:34`; a tap on it
 opened nothing; an xclock started by hand showed local time with a title bar, and its
-close button ended it. SSH was not checked, because the key on the test computer was
-refused. Then flashed: the phone booted from it, read `time-zone=+8` at 10.5 s, and
+close button ended it. SSH was not checked: the key on the test computer has a passphrase
+and no agent held it (see SSH above). Then flashed: the phone booted from it, read `time-zone=+8` at 10.5 s, and
 `alpine date` showed `+08` time; it joined the network at 29.2 s.
 
 ## Desktop
