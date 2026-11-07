@@ -83,9 +83,199 @@ pub fn for_touch(text: &str, height: u32) -> Option<String> {
     Some(changed)
 }
 
+/// Alpine's settings without what starts a program that is not installed, as told
+/// by `installed`. Alpine's menu lists Firefox, Gimp, xcalc and others, and its tray
+/// holds xclock, none of which come with JWM. A program installed later shows again.
+///
+/// - Menu entries whose command, or any command in its pipeline, is missing.
+/// - Submenus left empty, and separators left at an edge or next to another.
+/// - Tray programs (`Swallow`) and clock buttons (`exec:`) that are missing.
+pub fn without_missing(text: &str, installed: impl Fn(&str) -> bool) -> String {
+    let runs = |command: &str| commands(command).iter().all(|name| installed(name));
+    let mut text = remove_elements(text, "Program", |_, content| runs(content));
+    text = remove_elements(&text, "Swallow", |_, content| runs(content));
+    text = remove_elements(&text, "Button", |_, content| match content.trim().strip_prefix("exec:") {
+        Some(command) => runs(command),
+        None => true,
+    });
+    while let Some(range) = empty_menu(&text) {
+        remove_line(&mut text, range);
+    }
+    while let Some(range) = extra_separator(&text) {
+        remove_line(&mut text, range);
+    }
+    text
+}
+
+/// The programs a shell command line runs: the first word of each part of a
+/// pipeline or list.
+fn commands(line: &str) -> Vec<&str> {
+    line.split(['|', ';', '&'])
+        .filter_map(|part| part.split_whitespace().next())
+        .collect()
+}
+
+/// Where the element named `tag`, with its content, starts and ends in `text`,
+/// searched from `from`. Only elements with content are found, not `<tag/>`.
+fn find_element(text: &str, tag: &str, from: usize) -> Option<(usize, usize, usize, usize)> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut at = from;
+    loop {
+        let start = at + text[at..].find(&open)?;
+        let after = start + open.len();
+        // `<Program` must not match `<ProgramX`.
+        if !text[after..].starts_with([' ', '>', '\t', '\n']) {
+            at = after;
+            continue;
+        }
+        let content_start = after + text[after..].find('>')? + 1;
+        if text[..content_start].ends_with("/>") {
+            at = content_start;
+            continue;
+        }
+        let content_end = content_start + text[content_start..].find(&close)?;
+        return Some((start, content_start, content_end, content_end + close.len()));
+    }
+}
+
+/// `text` without each element named `tag` for which `keep(attributes, content)`
+/// is false.
+fn remove_elements(text: &str, tag: &str, keep: impl Fn(&str, &str) -> bool) -> String {
+    let mut text = text.to_string();
+    let mut at = 0;
+    while let Some((start, content_start, content_end, end)) = find_element(&text, tag, at) {
+        let attributes = &text[start + tag.len() + 1..content_start - 1];
+        if keep(attributes, &text[content_start..content_end]) {
+            at = end;
+        } else {
+            at = remove_line(&mut text, start..end);
+        }
+    }
+    text
+}
+
+/// A submenu with no entries, only separators, if there is one. Only the
+/// innermost submenus are checked, so an outer one is found once its last inner
+/// one is removed.
+fn empty_menu(text: &str) -> Option<std::ops::Range<usize>> {
+    let mut at = 0;
+    while let Some((start, content_start, content_end, end)) = find_element(text, "Menu", at) {
+        let content = &text[content_start..content_end];
+        if !content.contains("<Menu") && content.replace("<Separator/>", "").trim().is_empty() {
+            return Some(start..end);
+        }
+        at = content_start;
+    }
+    None
+}
+
+/// A separator first or last in a menu, or right after another, if there is one.
+fn extra_separator(text: &str) -> Option<std::ops::Range<usize>> {
+    const SEPARATOR: &str = "<Separator/>";
+    let mut at = 0;
+    while let Some(found) = text[at..].find(SEPARATOR) {
+        let start = at + found;
+        let end = start + SEPARATOR.len();
+        let before = text[..start].trim_end();
+        let last_tag = &before[before.rfind('<').unwrap_or(0)..];
+        let first = last_tag.starts_with("<Menu") || last_tag.starts_with("<RootMenu");
+        let after = text[end..].trim_start();
+        let last = after.starts_with("</Menu>") || after.starts_with("</RootMenu>");
+        if first || last || before.ends_with(SEPARATOR) {
+            return Some(start..end);
+        }
+        at = end;
+    }
+    None
+}
+
+/// Removes `range` from `text`, with its line when nothing else is on it. Returns
+/// where the text after it now starts.
+fn remove_line(text: &mut String, range: std::ops::Range<usize>) -> usize {
+    let line_start = text[..range.start].rfind('\n').map_or(0, |at| at + 1);
+    let alone_before = text[line_start..range.start].trim().is_empty();
+    let line_end = text[range.end..].find('\n').map_or(text.len(), |at| range.end + at + 1);
+    let alone_after = text[range.end..line_end].trim().is_empty();
+    let range = if alone_before && alone_after { line_start..line_end } else { range };
+    let start = range.start;
+    text.replace_range(range, "");
+    start
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Alpine's menu and tray as they come, shortened.
+    const MENUS: &str = r#"<JWM>
+    <RootMenu onroot="12">
+        <Program icon="utilities-terminal" label="Terminal">xterm</Program>
+        <Menu icon="folder" label="Applications">
+            <Program icon="calc" label="Calculator">xcalc</Program>
+            <Program icon="system-file-manager" label="ROX">rox ~</Program>
+        </Menu>
+        <Menu icon="folder" label="Utilities">
+            <Program icon="info" label="Window Properties">
+                xprop | xmessage -file -
+            </Program>
+        </Menu>
+        <Separator/>
+        <Program icon="lock" label="Lock">
+           xscreensaver-command -lock
+        </Program>
+        <Separator/>
+        <Restart label="Restart" icon="reload"/>
+        <Exit label="Exit" confirm="true" icon="exit"/>
+    </RootMenu>
+    <Tray x="0" y="-1">
+        <Swallow width="32" height="32" name="xclock">xclock</Swallow>
+        <Clock format="%l:%M %p"><Button mask="123">exec:xclock</Button></Clock>
+    </Tray>
+</JWM>
+"#;
+
+    #[test]
+    fn missing_programs_leave_the_menu_and_tray() {
+        let changed = without_missing(MENUS, |name| name == "xterm");
+        assert_eq!(
+            changed,
+            r#"<JWM>
+    <RootMenu onroot="12">
+        <Program icon="utilities-terminal" label="Terminal">xterm</Program>
+        <Separator/>
+        <Restart label="Restart" icon="reload"/>
+        <Exit label="Exit" confirm="true" icon="exit"/>
+    </RootMenu>
+    <Tray x="0" y="-1">
+        <Clock format="%l:%M %p"></Clock>
+    </Tray>
+</JWM>
+"#
+        );
+    }
+
+    #[test]
+    fn installed_programs_stay() {
+        let all = without_missing(MENUS, |_| true);
+        assert_eq!(all, MENUS);
+        // A pipeline shows only when every program in it is installed.
+        let some = without_missing(MENUS, |name| ["xterm", "xcalc", "xprop"].contains(&name));
+        assert!(some.contains(">xcalc</Program>"));
+        assert!(!some.contains("rox ~"));
+        assert!(!some.contains("xprop"));
+        assert!(!some.contains("Utilities"));
+        assert!(some.contains("Applications"));
+    }
+
+    #[test]
+    fn nested_menus_go_when_empty() {
+        let nested = "<RootMenu onroot=\"3\">\n<Menu label=\"A\">\n<Menu label=\"B\">\n<Program>gone</Program>\n</Menu>\n<Separator/>\n</Menu>\n<Program>xterm</Program>\n</RootMenu>\n";
+        assert_eq!(
+            without_missing(nested, |name| name == "xterm"),
+            "<RootMenu onroot=\"3\">\n<Program>xterm</Program>\n</RootMenu>\n"
+        );
+    }
 
     const ALPINE: &str = r#"<?xml version="1.0"?>
 <JWM>

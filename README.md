@@ -632,6 +632,12 @@ was too large for 480 pixels and cut off its Enter key; a 12 point font fits.
 The init starts JWM with a copy of Alpine's settings, `/run/a32-jwmrc`, changed in
 `src/jwmrc.rs`. A `/root/.jwmrc` in Alpine is used instead, as it is. The changes:
 
+- Alpine's menu lists Audacious, xcalc, Firefox, Gimp, Claws Mail, ROX, xfontsel, xprop,
+  xwininfo and an xscreensaver lock, and its tray holds xclock, but JWM brings none of
+  them, so they did nothing. Each time the desktop starts, entries whose program, or any
+  program in their pipeline, is not on Alpine's PATH are left out, with the submenus and
+  separators this leaves empty. A program installed later with `apk` shows again on the
+  next start. With the packages above, the menu holds Terminal, Restart and Exit.
 - Alpine's settings open the desktop's menu with the left button too, so a drag that
   started on the empty desktop opened the menu first. The menu, the JWM button and the
   keys that open it use the right button instead.
@@ -671,6 +677,10 @@ started with the desktop, and `ls` typed on it ran in xterm. svkbd once ended wi
 while a second copy was running, before the script could find the first one; that did
 not happen again. A key with a symbol missing from the X server's keymap may cause it,
 since the server has only its default keymap.
+
+The menu without missing programs was checked on a RAM boot: with `ui tap` the JWM button
+opened a menu of Terminal, Restart and Exit, the tray had no clock area, and Terminal
+started xterm. Not flashed yet.
 
 ## Wi-Fi
 

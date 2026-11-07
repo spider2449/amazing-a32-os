@@ -134,13 +134,16 @@ impl Session {
     }
 }
 
-/// JWM's settings: Alpine's own, changed for touch by `jwmrc::for_touch`. A
+/// JWM's settings: Alpine's own, without programs that are not installed and
+/// changed for touch by `jwmrc::for_touch`. A
 /// configuration of root's own is used as it is.
 fn window_manager_arguments(height: u32) -> Vec<&'static str> {
     if Path::new(USER_JWMRC).exists() {
         return Vec::new();
     }
-    let changed = fs::read_to_string(SYSTEM_JWMRC).ok().and_then(|text| jwmrc::for_touch(&text, height));
+    let changed = fs::read_to_string(SYSTEM_JWMRC)
+        .ok()
+        .and_then(|text| jwmrc::for_touch(&jwmrc::without_missing(&text, alpine::has_program), height));
     match changed {
         Some(text) if fs::write(JWMRC, &text).is_ok() => vec!["-f", JWMRC],
         _ => Vec::new(),

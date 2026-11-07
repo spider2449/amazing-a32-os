@@ -285,6 +285,15 @@ pub fn ssh_service() {
     }
 }
 
+/// Whether the chroot has this program: an absolute path as it is, or a name
+/// found on the chroot's PATH.
+pub fn has_program(name: &str) -> bool {
+    if name.starts_with('/') {
+        return Path::new(&format!("{ROOT}{name}")).is_file();
+    }
+    PATH.split(':').any(|dir| Path::new(&format!("{ROOT}{dir}/{name}")).is_file())
+}
+
 /// Starts a program in the chroot without waiting for it, with its output appended
 /// to `log_path`, a path outside the chroot. Returns its process id; `reap_forever`
 /// collects it when it ends, so its entry in /proc shows whether it still runs.
