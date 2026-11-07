@@ -522,6 +522,20 @@ because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
 in a different place, so a double tap cannot confirm by accident.
 
+Screenshots from the phone, taken with `scripts/screenshot.ps1` on 2026-11-07. Network
+names and the last half of the sensor's address are covered.
+
+| Home | Wi-Fi | Bluetooth | Camera |
+|---|---|---|---|
+| <img src="docs/images/panel-home.png" width="180" alt="Home page"> | <img src="docs/images/panel-wifi.png" width="180" alt="Wi-Fi page"> | <img src="docs/images/panel-bluetooth.png" width="180" alt="Bluetooth page"> | <img src="docs/images/panel-camera.png" width="180" alt="Camera page"> |
+
+| Console | Power | Desktop |
+|---|---|---|
+| <img src="docs/images/panel-console.png" width="180" alt="Console page"> | <img src="docs/images/panel-power.png" width="180" alt="Power page"> | <img src="docs/images/panel-desktop.png" width="180" alt="Desktop page"> |
+
+The Desktop page shows why the last desktop ended, here because the window manager was
+stopped from the console.
+
 A button acts when the finger lifts over it, and only if the finger came down on it. The
 screen turns off 60 seconds after the last use and drops anything typed. A touch or the
 power key turns it on, and that first touch presses nothing. Holding the power key for 3
@@ -596,7 +610,13 @@ fast as 2.8 ms. Other old devices may have the same problem.
 ## Desktop
 
 The panel's DESKTOP page starts an X11 desktop: the X server on `fb0` with the JWM window
-manager, from Alpine. It needs these packages, and the page names any that are missing:
+manager, from Alpine.
+
+| JWM menu | NetSurf |
+|---|---|
+| <img src="docs/images/desktop-menu.png" width="240" alt="JWM menu with the Applications submenu open, above the on-screen keyboard"> | <img src="docs/images/desktop-browser.png" width="240" alt="NetSurf showing its welcome page"> |
+
+It needs these packages, and the page names any that are missing:
 
 ```text
 apk add xorg-server xf86-video-fbdev xf86-input-evdev jwm xterm font-dejavu svkbd
