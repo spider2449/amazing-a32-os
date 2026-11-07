@@ -143,7 +143,8 @@ fn window_manager_arguments(height: u32) -> Vec<&'static str> {
     }
     let changed = fs::read_to_string(SYSTEM_JWMRC)
         .ok()
-        .and_then(|text| jwmrc::for_touch(&jwmrc::without_missing(&text, alpine::has_program), height));
+        .map(|text| jwmrc::without_missing(&jwmrc::with_extra_programs(&text), alpine::has_program))
+        .and_then(|text| jwmrc::for_touch(&text, height));
     match changed {
         Some(text) if fs::write(JWMRC, &text).is_ok() => vec!["-f", JWMRC],
         _ => Vec::new(),

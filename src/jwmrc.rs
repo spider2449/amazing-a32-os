@@ -83,6 +83,54 @@ pub fn for_touch(text: &str, height: u32) -> Option<String> {
     Some(changed)
 }
 
+/// Light programs that Alpine's menu does not list, as `(icon, label, command)`.
+/// Like the others, each shows only when it is installed.
+const EXTRA_PROGRAMS: &[(&str, &str, &str)] = &[
+    ("web-browser", "Browser", "netsurf"),
+    ("system-file-manager", "Files", "pcmanfm"),
+];
+
+/// Alpine's settings with `EXTRA_PROGRAMS` at the end of the menu named
+/// Applications, or at the top of the root menu if there is none.
+pub fn with_extra_programs(text: &str) -> String {
+    let entries: String = EXTRA_PROGRAMS
+        .iter()
+        .map(|(icon, label, command)| format!("<Program icon=\"{icon}\" label=\"{label}\">{command}</Program>\n"))
+        .collect();
+    let mut at = 0;
+    while let Some((start, content_start, content_end, _)) = find_element(text, "Menu", at) {
+        // Only an innermost menu ends at the first closing tag after it.
+        let innermost = !text[content_start..content_end].contains("<Menu");
+        if innermost && text[start..content_start].contains("label=\"Applications\"") {
+            let indent = line_indent(text, start);
+            let inner: String = entries.lines().map(|line| format!("{indent}    {line}\n")).collect();
+            // Before the line of the closing tag, so it keeps its indent.
+            let line_start = text[..content_end].rfind('\n').map_or(content_end, |at| at + 1);
+            return format!("{}{inner}{}", &text[..line_start], &text[line_start..]);
+        }
+        at = content_start;
+    }
+    match find_element(text, "RootMenu", 0) {
+        Some((start, content_start, _, _)) => {
+            let indent = line_indent(text, start);
+            let inner: String = entries.lines().map(|line| format!("\n{indent}    {line}")).collect();
+            format!("{}{inner}{}", &text[..content_start], &text[content_start..])
+        }
+        None => text.to_string(),
+    }
+}
+
+/// The spaces before the text at `at` on its line.
+fn line_indent(text: &str, at: usize) -> &str {
+    let line_start = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let indent = &text[line_start..at];
+    if indent.trim().is_empty() {
+        indent
+    } else {
+        ""
+    }
+}
+
 /// Alpine's settings without what starts a program that is not installed, as told
 /// by `installed`. Alpine's menu lists Firefox, Gimp, xcalc and others, and its tray
 /// holds xclock, none of which come with JWM. A program installed later shows again.
@@ -266,6 +314,27 @@ mod tests {
         assert!(!some.contains("xprop"));
         assert!(!some.contains("Utilities"));
         assert!(some.contains("Applications"));
+    }
+
+    #[test]
+    fn extra_programs_join_the_applications_menu() {
+        let added = with_extra_programs(MENUS);
+        assert!(added.contains(
+            "            <Program icon=\"system-file-manager\" label=\"ROX\">rox ~</Program>\n\
+             \x20           <Program icon=\"web-browser\" label=\"Browser\">netsurf</Program>\n\
+             \x20           <Program icon=\"system-file-manager\" label=\"Files\">pcmanfm</Program>\n\
+             \x20       </Menu>\n"
+        ));
+        // Shown only when installed.
+        let some = without_missing(&added, |name| ["xterm", "netsurf"].contains(&name));
+        assert!(some.contains(">netsurf</Program>"));
+        assert!(!some.contains("pcmanfm"));
+        assert!(!some.contains("xcalc"));
+        // Without an Applications menu they go at the top of the root menu.
+        let plain = "<RootMenu onroot=\"3\">\n<Program>xterm</Program>\n</RootMenu>\n";
+        assert!(with_extra_programs(plain).starts_with(
+            "<RootMenu onroot=\"3\">\n    <Program icon=\"web-browser\" label=\"Browser\">netsurf</Program>\n"
+        ));
     }
 
     #[test]

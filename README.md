@@ -638,6 +638,16 @@ The init starts JWM with a copy of Alpine's settings, `/run/a32-jwmrc`, changed 
   program in their pipeline, is not on Alpine's PATH are left out, with the submenus and
   separators this leaves empty. A program installed later with `apk` shows again on the
   next start. With the packages above, the menu holds Terminal, Restart and Exit.
+- NetSurf, a small browser, and PCManFM, a file manager, are added to the Applications
+  menu as Browser and Files, and also show only when installed. Alpine's menu already
+  has xcalc as Calculator, and its tray has xclock. These four are optional:
+
+  ```text
+  apk add xcalc xclock netsurf pcmanfm
+  ```
+
+  They added 34 packages, 21 MiB, as NetSurf's GTK 3 came with them. Running, NetSurf
+  took 34 MB of memory, PCManFM 29 MB, xclock 3 MB and xcalc 1.5 MB.
 - Alpine's settings open the desktop's menu with the left button too, so a drag that
   started on the empty desktop opened the menu first. The menu, the JWM button and the
   keys that open it use the right button instead.
@@ -680,7 +690,11 @@ since the server has only its default keymap.
 
 The menu without missing programs was checked on a RAM boot: with `ui tap` the JWM button
 opened a menu of Terminal, Restart and Exit, the tray had no clock area, and Terminal
-started xterm. Not flashed yet.
+started xterm. Then, with the four optional programs installed, on another RAM boot: the
+tray showed xclock, Applications held Calculator, Browser and Files, and each started;
+NetSurf showed its welcome page and PCManFM the files of `/`. The first tap on JWM, just
+after the desktop started, opened no menu, because the tray waits for xclock; a tap a few
+seconds later did. Not flashed yet.
 
 ## Wi-Fi
 
