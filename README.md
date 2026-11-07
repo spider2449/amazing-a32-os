@@ -177,7 +177,7 @@ still published. Two things it needed:
 found the phone, but `Resolve-DnsName` asks only DNS servers and says the name does
 not exist.
 
-Tested on a RAM boot: the init started avahi 15 s after the kernel, together with sshd.
+Tested on a RAM boot, then flashed: the init started avahi 15 s after the kernel, together with sshd.
 After clearing the Windows DNS cache, `ssh root@a32.local` logged in. Killed, it
 started again 5 s later and answered again.
 
@@ -188,7 +188,7 @@ compressed with lzo, and turns it on as swap before anything else starts. It wri
 the swap header itself, which matches what busybox `mkswap` wrote, so swap does not
 depend on Alpine. The log shows `zram swap: 435 MiB`.
 
-Tested on a RAM boot: one Python process filled 840 MiB of the 870 MB of RAM. It was
+Tested on a RAM boot (swap also came up from flash): one Python process filled 840 MiB of the 870 MB of RAM. It was
 not killed. 65 MB went to swap, and zram used at most 3.1 MB of RAM for it. That
 memory was repeated text, which compresses far better than real program memory, so
 this shows swap works, not how much it holds.
