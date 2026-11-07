@@ -913,8 +913,9 @@ within 30 s of starting.
 
 The panel's CAMERA page has REAR, FRONT, LIVE and BACK. LIVE shows the rear camera's
 live video on the screen; during it REAR and FRONT switch cameras, and the button
-reads STOP. The same camera thread fills a one-frame slot, which the panel empties
-when it draws, so a slow panel skips frames instead of falling behind. The view stops
+reads STOP. The camera thread hands each frame to a fitting thread when that one is
+free, which shrinks it to 480x640 and leaves it in a one-frame slot that the panel
+empties when it draws, so a slow step skips frames instead of falling behind. The view stops
 on STOP, BACK, when the screen turns off, or after 3 minutes; frames keep the screen
 on until then. It shares the one camera with the web, so a view running on either
 makes the other fail as busy.
@@ -928,7 +929,11 @@ frame to 480x640, 30 ms drawing the page and 15 ms copying it to the screen. Fit
 now works out each column's source pixels once and sums whole rows, with output
 equal to the old code's (a unit test compares them), and drawing an image goes row
 by row: fitting took 28 and 49 ms, and the panel drew 13.8 fps of 16.0 (rear) and
-10.6 of 12.7 (front). The first build never
+10.6 of 12.7 (front). Fitting then moved to its own thread, and drawing an image
+copies bytes when the screen's channels are whole bytes, as here (a unit test
+compares it with encoding each pixel); the panel then took 3-4 ms for the status,
+19-21 ms to draw and 13-14 ms to copy, and drew 15.6 fps of 15.7 (rear) and 11.6-13.0
+of 11.8-13.6 (front): the camera, not the panel, now sets the rate. The first build never
 drew a frame, because the panel loop handled every queued event before drawing and
 live frames kept arriving; it now handles only what was queued when it woke.
 After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it; with the faster

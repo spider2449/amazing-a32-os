@@ -24,7 +24,7 @@ use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
 use crate::shell::{self, Platform};
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
-use crate::ui::{Request, SensorRow, Snapshot, Ui};
+use crate::ui::{self, Request, SensorRow, Snapshot, Ui};
 use crate::usb;
 use crate::watchdog::{self, NetworkWatch, Service};
 use crate::web::{self, Route};
@@ -328,19 +328,22 @@ enum PanelInput {
 /// the screen on, so this is also how long it stays on without a touch.
 const PANEL_LIVE_LIMIT: Duration = Duration::from_secs(3 * 60);
 
-/// Live video on the camera page. Its thread leaves only the newest frame in
-/// `frame`, so a slow panel skips frames instead of falling behind.
+/// Live video on the camera page. The camera thread hands each frame to a fitting
+/// thread when it is free, which shrinks it for the page and leaves only the
+/// newest in `frame`, so a slow panel skips frames instead of falling behind.
 struct LiveView {
     number: u32,
     stop: Arc<AtomicBool>,
     frame: Arc<Mutex<Option<photo::Rgb>>>,
     thread: thread::JoinHandle<()>,
+    /// Ends after the camera thread; returns the frames it fitted and the time.
+    fitter: thread::JoinHandle<(u32, Duration)>,
     started: Instant,
     /// Frames the panel took from `frame` and drew.
     shown: u32,
-    /// Panel time while it ran: fitting frames, reading the status and drawing
-    /// the page, and copying it to the screen.
-    fitting: Duration,
+    /// Panel time while it ran: reading the status, drawing the page, and
+    /// copying it to the screen.
+    reading: Duration,
     drawing: Duration,
     presenting: Duration,
 }
@@ -349,33 +352,57 @@ impl LiveView {
     fn start(name: &'static str, number: u32, panel: mpsc::Sender<PanelInput>) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let frame = Arc::new(Mutex::new(None));
-        let (stopping, slot) = (stop.clone(), frame.clone());
+        // A rendezvous channel: a frame is only handed over when the fitter waits.
+        let (to_fit, frames) = mpsc::sync_channel::<photo::Rgb>(0);
+        let (slot, notify) = (frame.clone(), panel.clone());
+        let fitter = thread::Builder::new().spawn(move || {
+            let (mut fitted, mut fitting) = (0u32, Duration::ZERO);
+            for image in frames {
+                let t = Instant::now();
+                let image = ui::fit_photo(&image);
+                fitting += t.elapsed();
+                fitted += 1;
+                let mut waiting = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Only an empty slot needs telling the panel; otherwise it is told already.
+                if waiting.replace(image).is_none() && notify.send(PanelInput::LiveFrame(number)).is_err() {
+                    break;
+                }
+            }
+            (fitted, fitting)
+        })?;
+        let stopping = stop.clone();
         let thread = thread::Builder::new().spawn(move || {
             let Some(camera) = camera::by_name(name) else { return };
             log(&format!("camera: {name} live view on the panel"));
+            let mut dropped = 0u32;
             let result = camera::live(camera, PANEL_LIVE_LIMIT, |image| {
                 if stopping.load(Ordering::Acquire) {
                     return Err(io::Error::from(io::ErrorKind::Interrupted));
                 }
-                let mut waiting = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                // Only an empty slot needs telling the panel; otherwise it is told already.
-                if waiting.replace(image).is_none() && panel.send(PanelInput::LiveFrame(number)).is_err() {
-                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                match to_fit.try_send(image) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        dropped += 1;
+                        Ok(())
+                    }
+                    // The fitter stopped: the panel is gone.
+                    Err(mpsc::TrySendError::Disconnected(_)) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
                 }
-                Ok(())
             });
+            drop(to_fit);
             let message = match result {
                 Ok(summary) => {
                     let seconds = summary.elapsed.as_secs_f32().max(0.001);
                     log(&format!(
                         "camera: {name} panel live view ended: {} frames {}x{} in {:.0} s ({:.1} fps), \
-                         {} sensor frames passed over; shutter {} gain {:.2}x",
+                         {} sensor frames passed over, {} dropped while fitting; shutter {} gain {:.2}x",
                         summary.sent,
                         summary.width,
                         summary.height,
                         seconds,
                         summary.sent as f32 / seconds,
                         summary.skipped,
+                        dropped,
                         summary.exposure.shutter,
                         summary.exposure.gain as f32 / photo::UNIT_GAIN as f32,
                     ));
@@ -388,8 +415,27 @@ impl LiveView {
             };
             // Ignored by the panel once this view was stopped or replaced.
             let _ = panel.send(PanelInput::LiveEnded(number, message));
-        })?;
-        Ok(LiveView { number, stop, frame, thread, started: Instant::now(), shown: 0, fitting: Duration::ZERO, drawing: Duration::ZERO, presenting: Duration::ZERO })
+        });
+        let thread = match thread {
+            Ok(thread) => thread,
+            // `to_fit` went with the closure, so the fitter ends.
+            Err(err) => {
+                let _ = fitter.join();
+                return Err(err);
+            }
+        };
+        Ok(LiveView {
+            number,
+            stop,
+            frame,
+            thread,
+            fitter,
+            started: Instant::now(),
+            shown: 0,
+            reading: Duration::ZERO,
+            drawing: Duration::ZERO,
+            presenting: Duration::ZERO,
+        })
     }
 
     /// Stops the view and waits for the camera to be free, which takes up to a
@@ -397,15 +443,18 @@ impl LiveView {
     fn stop(self) {
         self.stop.store(true, Ordering::Release);
         let _ = self.thread.join();
+        let (fitted, fitting) = self.fitter.join().unwrap_or_default();
         let seconds = self.started.elapsed().as_secs_f32().max(0.001);
-        let per_frame = |total: Duration| total.as_millis() / u128::from(self.shown.max(1));
+        let per_frame = |total: Duration, count: u32| total.as_millis() / u128::from(count.max(1));
         log(&format!(
-            "panel: live view showed {} frames ({:.1} fps); per frame {} ms fit, {} ms draw, {} ms present",
+            "panel: live view showed {} frames ({:.1} fps); per frame {} ms fit (own thread), \
+             {} ms status, {} ms draw, {} ms present",
             self.shown,
             self.shown as f32 / seconds,
-            per_frame(self.fitting),
-            per_frame(self.drawing),
-            per_frame(self.presenting),
+            per_frame(fitting, fitted),
+            per_frame(self.reading, self.shown),
+            per_frame(self.drawing, self.shown),
+            per_frame(self.presenting, self.shown),
         ));
     }
 }
@@ -1351,11 +1400,13 @@ fn run_status_screen() -> io::Result<()> {
             let status = snapshot();
             // Taps until the next drawing pick from these, which are what is shown.
             panel.set_sensors(status.bluetooth_saved.clone(), status.bluetooth_candidates.clone());
+            let read = Instant::now();
             panel.render(&mut canvas, &status);
             let drawn = Instant::now();
             framebuffer.present(canvas.pixels())?;
             if let Some(view) = live.as_mut() {
-                view.drawing += drawn - t;
+                view.reading += read - t;
+                view.drawing += drawn - read;
                 view.presenting += drawn.elapsed();
             }
         }
@@ -1416,9 +1467,7 @@ fn run_status_screen() -> io::Result<()> {
                         let image = view.frame.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
                         if let Some(image) = image {
                             last_use = Instant::now();
-                            let t = Instant::now();
-                            panel.show_live(&image);
-                            view.fitting += t.elapsed();
+                            panel.show_live(image);
                             view.shown += 1;
                         }
                     }

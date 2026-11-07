@@ -70,6 +70,17 @@ impl Format {
         self.bits_per_pixel / 8
     }
 
+    /// Where red, green and blue sit in a pixel's bytes, when each is a whole byte,
+    /// so that an image can be drawn by copying bytes instead of encoding.
+    fn byte_channels(&self) -> Option<[usize; 3]> {
+        let bytes = self.bytes_per_pixel() as usize;
+        let at = |channel: Channel| {
+            let index = channel.offset as usize / 8;
+            (channel.length == 8 && channel.offset % 8 == 0 && index < bytes).then_some(index)
+        };
+        Some([at(self.red)?, at(self.green)?, at(self.blue)?])
+    }
+
     fn encode(&self, color: Rgb) -> u32 {
         self.red.encode(color.0)
             | self.green.encode(color.1)
@@ -183,13 +194,29 @@ impl Canvas {
         let columns = width.min(self.format.width.saturating_sub(x)) as usize;
         let rows = height.min(self.format.height.saturating_sub(y)) as usize;
         let format = self.format;
+        let channels = format.byte_channels();
+        // Alpha and any unused bits, the same for every pixel.
+        let base = format.encode(Rgb(0, 0, 0)).to_le_bytes();
         // Row by row, stopping where `data` runs out.
         for (row, source) in data.chunks(width as usize * 3).take(rows).enumerate() {
             let start = (y as usize + row) * stride + x as usize * bytes;
             let target = &mut self.pixels[start..start + columns * bytes];
-            for (pixel, out) in source.chunks_exact(3).take(columns).zip(target.chunks_exact_mut(bytes)) {
-                let encoded = format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
-                out.copy_from_slice(&encoded[..bytes]);
+            let pairs = source.chunks_exact(3).take(columns).zip(target.chunks_exact_mut(bytes));
+            match channels {
+                Some([red, green, blue]) => {
+                    for (pixel, out) in pairs {
+                        out.copy_from_slice(&base[..bytes]);
+                        out[red] = pixel[0];
+                        out[green] = pixel[1];
+                        out[blue] = pixel[2];
+                    }
+                }
+                None => {
+                    for (pixel, out) in pairs {
+                        let encoded = format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
+                        out.copy_from_slice(&encoded[..bytes]);
+                    }
+                }
             }
         }
     }
@@ -357,6 +384,35 @@ pub mod tests {
         canvas.draw_rgb(20, 20, 2, 2, &[3, 3, 3, 4, 4, 4, 5, 5, 5]);
         assert_eq!(pixel(&canvas, 20, 21), [5, 5, 5, 255]);
         assert_eq!(pixel(&canvas, 21, 21), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn drawn_images_match_encoding_each_pixel() {
+        let bgra = Format { red: Channel { offset: 16, length: 8 }, blue: Channel { offset: 0, length: 8 }, ..rgba8888() };
+        let rgb565 = Format {
+            stride: 960,
+            bits_per_pixel: 16,
+            red: Channel { offset: 11, length: 5 },
+            green: Channel { offset: 5, length: 6 },
+            blue: Channel { offset: 0, length: 5 },
+            alpha: Channel { offset: 0, length: 0 },
+            ..rgba8888()
+        };
+        assert_eq!(rgba8888().byte_channels(), Some([0, 1, 2]));
+        assert_eq!(bgra.byte_channels(), Some([2, 1, 0]));
+        assert_eq!(rgb565.byte_channels(), None);
+        let data: Vec<u8> = (0..3 * 4 * 3).map(|i| (i * 37 % 256) as u8).collect();
+        for format in [rgba8888(), bgra, rgb565] {
+            let mut canvas = Canvas::new(format);
+            canvas.draw_rgb(10, 20, 4, 3, &data);
+            let bytes = format.bytes_per_pixel() as usize;
+            for (index, pixel) in data.chunks(3).enumerate() {
+                let (x, y) = (10 + index as u32 % 4, 20 + index as u32 / 4);
+                let at = (y * format.stride) as usize + x as usize * bytes;
+                let encoded = format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
+                assert_eq!(canvas.pixels()[at..at + bytes], encoded[..bytes], "{format:?} at {x},{y}");
+            }
+        }
     }
 
     #[test]

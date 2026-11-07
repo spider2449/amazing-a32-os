@@ -29,6 +29,7 @@ pub const UNIT_GAIN: u32 = 64;
 pub const TARGET_LEVEL: f32 = 180.0;
 
 /// An 8-bit RGB image, rows top to bottom.
+#[derive(Clone)]
 pub struct Rgb {
     pub width: usize,
     pub height: usize,

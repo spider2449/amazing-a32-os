@@ -215,7 +215,7 @@ impl Button {
 }
 
 /// An image made small enough for the camera page.
-fn fit_photo(image: &photo::Rgb) -> photo::Rgb {
+pub fn fit_photo(image: &photo::Rgb) -> photo::Rgb {
     photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize)
 }
 
@@ -315,10 +315,11 @@ impl Ui {
         self.photo = Some(fit_photo(image));
     }
 
-    /// Shows a live frame, unless live video has stopped since it was taken.
-    pub fn show_live(&mut self, image: &photo::Rgb) {
+    /// Shows a live frame already made to fit by `fit_photo`, unless live video
+    /// has stopped since it was taken.
+    pub fn show_live(&mut self, image: photo::Rgb) {
         if self.live.is_some() {
-            self.set_photo(image);
+            self.photo = Some(image);
         }
     }
 
@@ -1460,13 +1461,13 @@ mod tests {
     #[test]
     fn camera_page_shows_live_video_until_stopped_or_left() {
         use crate::display::tests::rgba8888;
-        let frame = photo::Rgb { width: 486, height: 648, data: vec![90; 486 * 648 * 3] };
+        let frame = fit_photo(&photo::Rgb { width: 486, height: 648, data: vec![90; 486 * 648 * 3] });
         let mut ui = Ui { page: Page::Camera, ..Ui::default() };
         assert!(matches!(tap_button(&mut ui, Press::ToggleLive), Some(Request::Live("rear"))));
         assert_eq!(ui.live, Some("rear"));
         let mut canvas = Canvas::new(rgba8888());
         ui.render(&mut canvas, &Snapshot::default());
-        ui.show_live(&frame);
+        ui.show_live(frame.clone());
         assert_eq!(ui.photo.as_ref().map(|image| (image.width, image.height)), Some((480, 640)));
         ui.render(&mut canvas, &Snapshot::default());
 
@@ -1477,7 +1478,7 @@ mod tests {
         assert!(matches!(tap_button(&mut ui, Press::ToggleLive), Some(Request::StopLive)));
         assert_eq!(ui.live, None);
         // A frame sent before the stop arrives after it and is not shown.
-        ui.show_live(&frame);
+        ui.show_live(frame.clone());
         assert!(ui.photo.is_none());
         // Stopped, REAR takes a photo again.
         assert!(matches!(tap_button(&mut ui, Press::Photo("rear")), Some(Request::Photo("rear"))));
@@ -1490,7 +1491,7 @@ mod tests {
         // Stopping on its own leaves the last frame and says why.
         ui.page = Page::Camera;
         tap_button(&mut ui, Press::ToggleLive);
-        ui.show_live(&frame);
+        ui.show_live(frame.clone());
         ui.live_ended("Live video ended after 3 min".to_string());
         assert_eq!(ui.live, None);
         assert!(ui.photo.is_some());
