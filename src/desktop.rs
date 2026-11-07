@@ -3,6 +3,8 @@
 //! touches, and draws again once either program ends.
 
 use crate::alpine;
+use crate::jwmrc;
+use crate::pid1::log;
 use std::fs;
 use std::io;
 use std::os::raw::c_int;
@@ -28,6 +30,7 @@ const NEEDED: &[(&str, &str)] = &[
     (WINDOW_MANAGER, "jwm"),
     ("/usr/bin/xterm", "xterm"),
     ("/usr/share/fonts/dejavu", "font-dejavu"),
+    ("/usr/bin/svkbd-mobile-intl", "svkbd"),
 ];
 // /run is shared with the chroot, so these paths are the same on both sides.
 const CONFIG: &str = "/run/a32-xorg.conf";
@@ -61,8 +64,9 @@ pub fn missing_packages() -> Vec<&'static str> {
 }
 
 /// Starts the X server on the framebuffer, with `pointer` as its only input, then
-/// the window manager once the server listens.
-pub fn start() -> io::Result<Session> {
+/// the window manager once the server listens, and the on-screen keyboard. The
+/// size is the screen's, in pixels.
+pub fn start(width: u32, height: u32) -> io::Result<Session> {
     let missing = missing_packages();
     if !missing.is_empty() {
         return Err(io::Error::other(format!("not installed: {}", missing.join(" "))));
@@ -93,13 +97,22 @@ pub fn start() -> io::Result<Session> {
         }
         thread::sleep(CHECK);
     }
-    match alpine::spawn(WINDOW_MANAGER, &window_manager_arguments(), &[("DISPLAY", DISPLAY)], SESSION_LOG) {
-        Ok(window_manager) => Ok(Session { xorg, window_manager }),
-        Err(err) => {
-            stop(xorg);
-            Err(err)
-        }
+    let window_manager =
+        match alpine::spawn(WINDOW_MANAGER, &window_manager_arguments(height), &[("DISPLAY", DISPLAY)], SESSION_LOG) {
+            Ok(window_manager) => window_manager,
+            Err(err) => {
+                stop(xorg);
+                return Err(err);
+            }
+        };
+    // The keyboard shows from the start; the KB button in the tray hides it. It is
+    // not watched: closing it leaves the desktop running.
+    let keyboard = fs::write(jwmrc::KEYBOARD_SCRIPT, jwmrc::keyboard_script(width, height))
+        .and_then(|()| alpine::spawn("/bin/sh", &[jwmrc::KEYBOARD_SCRIPT], &[("DISPLAY", DISPLAY)], SESSION_LOG));
+    if let Err(err) = keyboard {
+        log(&format!("desktop: the keyboard did not start: {err}"));
     }
+    Ok(Session { xorg, window_manager })
 }
 
 impl Session {
@@ -121,32 +134,17 @@ impl Session {
     }
 }
 
-/// JWM's settings: Alpine's own, except that the menu on the empty desktop opens
-/// with the right button only. Alpine's open it with the left one too, so a drag
-/// that started on the desktop opened the menu first. A configuration of root's
-/// own is used as it is.
-fn window_manager_arguments() -> Vec<&'static str> {
+/// JWM's settings: Alpine's own, changed for touch by `jwmrc::for_touch`. A
+/// configuration of root's own is used as it is.
+fn window_manager_arguments(height: u32) -> Vec<&'static str> {
     if Path::new(USER_JWMRC).exists() {
         return Vec::new();
     }
-    let changed = fs::read_to_string(SYSTEM_JWMRC).ok().and_then(|text| root_menu_on_right(&text));
+    let changed = fs::read_to_string(SYSTEM_JWMRC).ok().and_then(|text| jwmrc::for_touch(&text, height));
     match changed {
         Some(text) if fs::write(JWMRC, &text).is_ok() => vec!["-f", JWMRC],
         _ => Vec::new(),
     }
-}
-
-/// Sets the buttons of the first root menu to the right one only. Tray buttons
-/// name the menu by a button, such as `root:1` for the JWM button, so they follow.
-fn root_menu_on_right(text: &str) -> Option<String> {
-    const KEY: &str = "<RootMenu onroot=\"";
-    let start = text.find(KEY)? + KEY.len();
-    let end = start + text[start..].find('"')?;
-    let mut changed = format!("{}3{}", &text[..start], &text[end..]);
-    for button in text[start..end].chars() {
-        changed = changed.replace(&format!(">root:{button}<"), ">root:3<");
-    }
-    Some(changed)
 }
 
 /// The X server's settings: the framebuffer, and the pointer instead of the touch

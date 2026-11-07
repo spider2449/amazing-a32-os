@@ -25,6 +25,8 @@ mod properties;
 
 #[cfg(target_os = "linux")]
 mod desktop;
+#[cfg(any(target_os = "linux", test))]
+mod jwmrc;
 #[cfg(target_os = "linux")]
 mod pointer;
 #[cfg(any(target_os = "linux", test))]

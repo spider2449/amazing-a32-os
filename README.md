@@ -599,7 +599,7 @@ The panel's DESKTOP page starts an X11 desktop: the X server on `fb0` with the J
 manager, from Alpine. It needs these packages, and the page names any that are missing:
 
 ```text
-apk add xorg-server xf86-video-fbdev xf86-input-evdev jwm xterm font-dejavu
+apk add xorg-server xf86-video-fbdev xf86-input-evdev jwm xterm font-dejavu svkbd
 ```
 
 With them and a few test tools, `apk` reported 267 MiB for all of Alpine. The X server
@@ -624,10 +624,28 @@ finger was. A finger that moves more than 20 pixels drags with the left button f
 it came down; a held finger drifted about 6 pixels. A finger held still for 1.5 seconds
 clicks the right button. The user tried 0.7, 1, 2 and 1.5 seconds by hand and chose 1.5.
 
-Alpine's JWM settings open the desktop's menu with the left button too, so a drag that
-started on the empty desktop opened the menu first. The init therefore starts JWM with a
-copy, `/run/a32-jwmrc`, where that menu and the JWM button use the right button. A
-`/root/.jwmrc` in Alpine is used instead, as it is.
+The on-screen keyboard is `svkbd`, from suckless, made for phones. Alpine has no `xvkbd`.
+It starts with the desktop, 300 pixels high, above JWM's tray, and the KB button in the
+tray hides or shows it, with the script `/run/a32-keyboard`. At first its default font
+was too large for 480 pixels and cut off its Enter key; a 12 point font fits.
+
+The init starts JWM with a copy of Alpine's settings, `/run/a32-jwmrc`, changed in
+`src/jwmrc.rs`. A `/root/.jwmrc` in Alpine is used instead, as it is. The changes:
+
+- Alpine's settings open the desktop's menu with the left button too, so a drag that
+  started on the empty desktop opened the menu first. The menu, the JWM button and the
+  keys that open it use the right button instead.
+- With Alpine's focus following the pointer, a finger on the keyboard took the focus away
+  from the window being typed in, and nothing was typed. Focus now moves on a click.
+- JWM put the keyboard at the top of the screen with a title, whatever position it asked
+  for, even as a dock. A group for it sets its place, no title or border, above other
+  windows, and no focus.
+
+JWM's tray buttons that start a program, such as KB, did nothing when the press and the
+release came together, which is what a tap makes when the finger lifts; `xdotool click`
+on the same place worked. The init now waits 30 ms after each press. BusyBox's `pkill -x`
+matches the whole program name, `svkbd-mobile-intl`, not the 15 characters the kernel
+keeps.
 
 The panel stops drawing while the desktop runs, and touches go only to the desktop. The
 power key and the screen timeout work as on the panel. The desktop ends when JWM or the
@@ -644,7 +662,14 @@ server returned to the panel too; and a second start worked. `ui drag` cannot mo
 window, because it sends all of its points at once, and JWM reads the pointer's position
 when the button goes down, by which time the pointer is already at the end. Then flashed:
 the phone booted from it, and with `ui tap` the desktop started and the JWM menu opened a
-terminal. There is no on-screen keyboard on the desktop yet.
+terminal.
+
+The keyboard was checked on RAM boots: with `ui tap`, `ls` typed in xterm ran, and KB hid
+the keyboard and showed it again in its place; by hand, the user typed commands, used
+symbol keys and the KB button. svkbd once ended with `BadValue` from `XTestFakeInput`
+while a second copy was running, before the script could find the first one; that did
+not happen again. A key with a symbol missing from the X server's keymap may cause it,
+since the server has only its default keymap.
 
 ## Wi-Fi
 

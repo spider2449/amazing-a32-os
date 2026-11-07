@@ -942,6 +942,7 @@ impl Ui {
                     "Tap: left button.",
                     "Move the finger: drag.",
                     "Hold still 1.5 s: right button.",
+                    "KB in the tray: keyboard.",
                     "",
                     "Leave with Exit in the menu",
                     "of the JWM button.",

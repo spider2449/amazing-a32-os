@@ -40,6 +40,8 @@ const ABS_Y: u16 = 1;
 const ABS_COUNT: usize = 64;
 const NAME_LEN: usize = 80;
 const BUS_VIRTUAL: u16 = 6;
+/// How long a press lasts before the events after it.
+const PRESS_GAP: Duration = Duration::from_millis(30);
 
 pub struct Pointer {
     file: File,
@@ -81,9 +83,13 @@ impl Pointer {
 
     /// Sends the events, each as its own report, so that a move lands before a
     /// press at the new place.
+    ///
+    /// A press is followed by a short wait. A tap makes the press and the release
+    /// together, when the finger lifts, and JWM's tray buttons that start a program
+    /// missed a release that came with its press.
     pub fn send(&mut self, events: &[PointerEvent]) -> io::Result<()> {
         let mut bytes = Vec::with_capacity(events.len() * 3 * EVENT_LEN);
-        for event in events {
+        for (index, event) in events.iter().enumerate() {
             match *event {
                 PointerEvent::Move(x, y) => {
                     bytes.extend(raw(EV_ABS, ABS_X, x));
@@ -93,6 +99,11 @@ impl Pointer {
                 PointerEvent::Release(button) => bytes.extend(raw(EV_KEY, code(button), 0)),
             }
             bytes.extend(raw(EV_SYN, SYN_REPORT, 0));
+            if matches!(event, PointerEvent::Press(_)) && index + 1 < events.len() {
+                self.file.write_all(&bytes)?;
+                bytes.clear();
+                thread::sleep(PRESS_GAP);
+            }
         }
         self.file.write_all(&bytes)
     }

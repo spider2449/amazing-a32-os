@@ -353,7 +353,7 @@ fn start_desktop(pointer: &mut Option<Pointer>, format: Format, panel: &mut Ui, 
     log("panel: starting the desktop");
     let input = input.clone();
     let spawned = thread::Builder::new().spawn(move || {
-        let message = match desktop::start() {
+        let message = match desktop::start(format.width, format.height) {
             Ok(session) => {
                 let _ = input.send(PanelInput::DesktopStarted);
                 format!("The desktop ended: {}.", session.wait())
