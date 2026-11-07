@@ -928,6 +928,7 @@ part of fitting the frame to 480x640 and redrawing the page limits it was not
 measured. The first build never
 drew a frame, because the panel loop handled every queued event before drawing and
 live frames kept arriving; it now handles only what was queued when it woke.
+After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
