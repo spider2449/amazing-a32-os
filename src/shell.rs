@@ -36,11 +36,11 @@ const HELP: &str = "commands:
   ui tap X Y                   act as if the screen were touched there
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
-  camera rear|front NEW_FILE    take a photo and save it as a JPEG
+  camera rear|front NEW_FILE   take a photo and save it as a JPEG
   web password                 say whether the web cameras have a password
   web password NEW|off         set the password for the web cameras (10 to 64
                                printable characters, no spaces), or turn them off
-  poweroff[SECONDS]           turn the phone off, optionally after a delay
+  poweroff [SECONDS]           turn the phone off, optionally after a delay
 ";
 
 /// Operations that need the real kernel, abstracted for host testing.
@@ -92,7 +92,8 @@ pub fn run(input: impl BufRead, mut out: impl Write, platform: &impl Platform) -
     Ok(())
 }
 
-fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Result<()> {
+/// Runs one line, writing its output and any error to `out`. Fails only if `out` does.
+pub fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let result = match words.as_slice() {
         [] => Ok(()),

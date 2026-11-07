@@ -515,7 +515,7 @@ the phone off. Without USB it stays off until the key starts it again.
 The screen is a panel, drawn by the init with no other graphics software. The home page
 shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
 power off the phone, scan for and join a WPA2 network with an on-screen keyboard, and turn
-the BLE scan on or off. The Bluetooth page shows the scan's state, up to 4 sensors with their
+the BLE scan on or off, take photos, and run console commands. The Bluetooth page shows the scan's state, up to 4 sensors with their
 values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
 because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
@@ -527,6 +527,18 @@ power key turns it on, and that first touch presses nothing. Holding the power k
 seconds powers off, as before. The RESTART and POWER OFF buttons were each tested once with
 `ui tap`, with USB attached: the phone left and returned, and after a power off it rejoined
 the network.
+
+The home page's buttons are WI-FI, BLE, CAMERA, CONSOLE and POWER, in small letters
+so that five fit. The CONSOLE page runs the serial console's commands (`help` lists
+them), typed with the on-screen keyboard: RUN runs the line, LAST brings back earlier
+ones, and OUTPUT hides the keyboard to show 36 lines instead of 15, with UP and DOWN
+to scroll. Long lines wrap at spaces. A command runs on the panel's worker thread, so the
+screen keeps answering, but the next request waits for it. Only the command's name is
+logged, since the rest can be a password. Turning the screen off clears the commands
+and output, and output that arrives while it is off is dropped. Anyone holding the
+phone can therefore run commands as root, as the USB serial console already allows.
+Checked on a RAM boot with `ui tap` and screenshots: `info` and `help`, the hidden
+keyboard and scrolling.
 
 The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
 enterprise networks are not listed, because this system cannot join them. Text is ASCII, so

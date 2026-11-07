@@ -42,6 +42,16 @@ const SENSOR_ROW_HEIGHT: u32 = 58;
 const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
 /// Where the camera page shows its photo: a 3:4 portrait photo fills it.
 const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
+/// The console page: output lines above the line being typed and the keyboard,
+/// or down to the bottom row with the keyboard hidden.
+const COMMAND_LIMIT: usize = 200;
+const CONSOLE_KEEP: usize = 2000;
+const CONSOLE_TOP: u32 = 96;
+const CONSOLE_LINE: u32 = 18;
+const CONSOLE_INPUT: Rect = Rect { x: 0, y: 380, width: WIDTH, height: 52 };
+const CONSOLE_COLUMNS: usize = ((WIDTH - MARGIN * 2) / (CHAR_WIDTH * TEXT_SMALL)) as usize;
+/// Commands kept for LAST.
+const HISTORY_KEEP: usize = 20;
 
 const LOWER: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const UPPER: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
@@ -94,6 +104,8 @@ pub enum Request {
     RemoveSensor(String),
     /// Takes a photo with the named camera, "rear" or "front".
     Photo(&'static str),
+    /// Runs a line as the serial console would.
+    Console(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -128,6 +140,7 @@ enum Page {
     AddSensor,
     ConfirmRemoveSensor,
     Camera,
+    Console,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -160,6 +173,14 @@ enum Press {
     RemoveSensor,
     OpenCamera,
     Photo(&'static str),
+    OpenConsole,
+    Run,
+    /// Brings back an earlier command, one further back each time.
+    LastCommand,
+    /// Hides or shows the keyboard, to see more output.
+    ToggleConsoleKeys,
+    ScrollUp,
+    ScrollDown,
 }
 
 struct Button {
@@ -212,6 +233,15 @@ pub struct Ui {
     sensor_target: Option<String>,
     /// The last photo, already sized for the camera page.
     photo: Option<photo::Rgb>,
+    /// The console page: the line being typed, earlier commands (newest last) and
+    /// how far LAST has gone back, the output so far, whether the keyboard shows,
+    /// and how many wrapped lines the view is scrolled up from the end.
+    command: String,
+    history: Vec<String>,
+    history_back: usize,
+    console: Vec<String>,
+    console_keys: bool,
+    console_scroll: usize,
 }
 
 impl Default for Ui {
@@ -231,8 +261,40 @@ impl Default for Ui {
             candidates: Vec::new(),
             sensor_target: None,
             photo: None,
+            command: String::new(),
+            history: Vec::new(),
+            history_back: 0,
+            console: Vec::new(),
+            console_keys: true,
+            console_scroll: 0,
         }
     }
+}
+
+/// Splits lines into screen lines of at most `columns` characters, at a space
+/// where there is one past the line's indentation, otherwise anywhere.
+fn wrap(lines: &[String], columns: usize) -> Vec<String> {
+    let columns = columns.max(1);
+    let mut out = Vec::new();
+    for line in lines {
+        let mut rest: Vec<char> = line.chars().collect();
+        if rest.is_empty() {
+            out.push(String::new());
+        }
+        while !rest.is_empty() {
+            if rest.len() <= columns {
+                out.push(rest.iter().collect());
+                break;
+            }
+            let indent = rest.iter().take_while(|character| **character == ' ').count();
+            let cut = (indent + 1..=columns).rev().find(|&at| rest[at] == ' ').unwrap_or(columns);
+            out.push(rest[..cut].iter().collect::<String>().trim_end().to_string());
+            // The spaces at the break are not carried to the next line.
+            let next = (cut..rest.len()).find(|&at| rest[at] != ' ').unwrap_or(rest.len());
+            rest.drain(..next);
+        }
+    }
+    out
 }
 
 impl Ui {
@@ -255,6 +317,23 @@ impl Ui {
         self.photo = Some(photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize));
     }
 
+    /// Adds a command's output to the console page and shows its end. Tabs become
+    /// spaces and other characters the font lacks become `?`.
+    pub fn add_console_output(&mut self, text: &str) {
+        for line in text.lines() {
+            let line = line
+                .replace('\t', "    ")
+                .chars()
+                .map(|character| if (' '..='~').contains(&character) { character } else { '?' })
+                .collect();
+            self.console.push(line);
+        }
+        let excess = self.console.len().saturating_sub(CONSOLE_KEEP);
+        self.console.drain(..excess);
+        self.console_scroll = 0;
+        self.message.clear();
+    }
+
     /// Back to the home page, without anything typed. Used when the screen turns off,
     /// so that a passphrase does not stay on the panel.
     pub fn reset(&mut self) {
@@ -265,6 +344,19 @@ impl Ui {
         // A photo should not wait on a dark screen for the next person to wake it.
         self.photo = None;
         self.clear_typed();
+        // Nor console commands and output, which can hold a password.
+        self.command.clear();
+        self.history.clear();
+        self.history_back = 0;
+        self.console.clear();
+        self.console_keys = true;
+        self.console_scroll = 0;
+    }
+
+    /// How many output lines the console page shows now.
+    fn console_rows(&self) -> usize {
+        let bottom = if self.console_keys { CONSOLE_INPUT.y } else { BOTTOM_ROW.y };
+        ((bottom - 8 - CONSOLE_TOP) / CONSOLE_LINE) as usize
     }
 
     fn clear_typed(&mut self) {
@@ -389,6 +481,14 @@ impl Ui {
                     self.page = Page::Keyboard;
                 }
             }
+            Press::Key(character) if self.page == Page::Console => {
+                if self.command.len() < COMMAND_LIMIT {
+                    self.command.push(character);
+                }
+            }
+            Press::Delete if self.page == Page::Console => {
+                self.command.pop();
+            }
             Press::Key(character) => {
                 if self.typed.len() < PASSPHRASE_LIMIT {
                     self.typed.push(character);
@@ -397,6 +497,42 @@ impl Ui {
             }
             Press::Delete => {
                 self.typed.pop();
+            }
+            Press::OpenConsole => self.page = Page::Console,
+            Press::Run => {
+                let line = self.command.trim().to_string();
+                if !line.is_empty() {
+                    self.command.clear();
+                    self.console.push(format!("a32> {line}"));
+                    self.console_scroll = 0;
+                    self.history.retain(|earlier| *earlier != line);
+                    self.history.push(line.clone());
+                    let excess = self.history.len().saturating_sub(HISTORY_KEEP);
+                    self.history.drain(..excess);
+                    self.history_back = 0;
+                    self.message = "Running...".to_string();
+                    return Some(Request::Console(line));
+                }
+            }
+            Press::LastCommand => {
+                if !self.history.is_empty() {
+                    self.history_back = self.history_back % self.history.len() + 1;
+                    self.command = self.history[self.history.len() - self.history_back].clone();
+                }
+            }
+            Press::ToggleConsoleKeys => {
+                self.console_keys = !self.console_keys;
+                self.console_scroll = 0;
+            }
+            Press::ScrollUp | Press::ScrollDown => {
+                let rows = self.console_rows();
+                let total = wrap(&self.console, CONSOLE_COLUMNS).len();
+                let page = rows.saturating_sub(1).max(1);
+                self.console_scroll = if press == Press::ScrollUp {
+                    (self.console_scroll + page).min(total.saturating_sub(rows))
+                } else {
+                    self.console_scroll.saturating_sub(page)
+                };
             }
             Press::Shift => {
                 self.layer = match self.layer {
@@ -435,13 +571,39 @@ impl Ui {
 
     fn buttons(&self) -> Vec<Button> {
         match self.page {
-            Page::Home => vec![
-                Button::new(split(BOTTOM_ROW, 4, 0), "WI-FI", Press::OpenNetworks),
-                // Smaller, because these labels at the normal size are wider than a
-                // quarter of the screen.
-                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 4, 1), "BLUETOOTH", Press::OpenBluetooth) },
-                Button { scale: TEXT_SMALL, ..Button::new(split(BOTTOM_ROW, 4, 2), "CAMERA", Press::OpenCamera) },
-                Button::new(split(BOTTOM_ROW, 4, 3), "POWER", Press::OpenPower),
+            // Five to a row only fit at the small size, and BLUETOOTH not even then.
+            Page::Home => [
+                ("WI-FI", Press::OpenNetworks),
+                ("BLE", Press::OpenBluetooth),
+                ("CAMERA", Press::OpenCamera),
+                ("CONSOLE", Press::OpenConsole),
+                ("POWER", Press::OpenPower),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, press))| Button {
+                scale: TEXT_SMALL,
+                ..Button::new(split(BOTTOM_ROW, 5, index as u32), label, press)
+            })
+            .collect(),
+            Page::Console if self.console_keys => {
+                let mut buttons = self.key_rows();
+                let row = Rect { x: 0, y: KEY_TOP + 3 * KEY_HEIGHT, width: WIDTH, height: KEY_HEIGHT };
+                let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
+                buttons.push(Button::new(split(row, 4, 0), symbols, Press::SwitchSymbols));
+                let space = Rect { width: split(row, 4, 2).x + split(row, 4, 2).width - split(row, 4, 1).x, ..split(row, 4, 1) };
+                buttons.push(Button::new(space, "SPACE", Press::Key(' ')));
+                buttons.push(Button::new(split(row, 4, 3), "RUN", Press::Run));
+                buttons.push(Button::new(split(BOTTOM_ROW, 3, 0), "LAST", Press::LastCommand));
+                buttons.push(Button::new(split(BOTTOM_ROW, 3, 1), "OUTPUT", Press::ToggleConsoleKeys));
+                buttons.push(Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home));
+                buttons
+            }
+            Page::Console => vec![
+                Button::new(split(BOTTOM_ROW, 4, 0), "UP", Press::ScrollUp),
+                Button::new(split(BOTTOM_ROW, 4, 1), "DOWN", Press::ScrollDown),
+                Button::new(split(BOTTOM_ROW, 4, 2), "KEYS", Press::ToggleConsoleKeys),
+                Button::new(split(BOTTOM_ROW, 4, 3), "BACK", Press::Home),
             ],
             Page::Camera => vec![
                 Button::new(split(BOTTOM_ROW, 3, 0), "REAR", Press::Photo("rear")),
@@ -546,6 +708,28 @@ impl Ui {
     }
 
     fn keyboard_buttons(&self) -> Vec<Button> {
+        let mut buttons = self.key_rows();
+        let y = KEY_TOP + 3 * KEY_HEIGHT;
+        let row = Rect { x: 0, y, width: WIDTH, height: KEY_HEIGHT };
+        let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
+        buttons.push(Button::new(split(row, 4, 0), symbols, Press::SwitchSymbols));
+        buttons.push(Button::new(split(row, 4, 1), "SPACE", Press::Key(' ')));
+        buttons.push(Button::new(
+            split(row, 4, 2),
+            if self.show_typed { "HIDE" } else { "SHOW" },
+            Press::ToggleShow,
+        ));
+        buttons.push(Button::new(split(row, 4, 3), "JOIN", Press::Join));
+        buttons.push(Button::new(
+            BOTTOM_ROW,
+            "CANCEL",
+            Press::CancelKeyboard,
+        ));
+        buttons
+    }
+
+    /// The three rows of character keys, with shift and delete.
+    fn key_rows(&self) -> Vec<Button> {
         const KEY_WIDTH: u32 = WIDTH / 10;
         let mut buttons = Vec::new();
         let rows = self.layer.rows();
@@ -582,22 +766,6 @@ impl Ui {
                 ));
             }
         }
-        let y = KEY_TOP + 3 * KEY_HEIGHT;
-        let row = Rect { x: 0, y, width: WIDTH, height: KEY_HEIGHT };
-        let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
-        buttons.push(Button::new(split(row, 4, 0), symbols, Press::SwitchSymbols));
-        buttons.push(Button::new(split(row, 4, 1), "SPACE", Press::Key(' ')));
-        buttons.push(Button::new(
-            split(row, 4, 2),
-            if self.show_typed { "HIDE" } else { "SHOW" },
-            Press::ToggleShow,
-        ));
-        buttons.push(Button::new(split(row, 4, 3), "JOIN", Press::Join));
-        buttons.push(Button::new(
-            BOTTOM_ROW,
-            "CANCEL",
-            Press::CancelKeyboard,
-        ));
         buttons
     }
 
@@ -649,6 +817,7 @@ impl Ui {
                 canvas.draw_text(MARGIN, 260, TEXT_MEDIUM, "It is no longer shown", FOREGROUND);
                 canvas.draw_text(MARGIN, 300, TEXT_MEDIUM, "or recorded.", FOREGROUND);
             }
+            Page::Console => self.render_console(canvas),
             Page::Camera => {
                 title(canvas, "CAMERA");
                 match &self.photo {
@@ -720,6 +889,38 @@ impl Ui {
                 canvas.draw_text(MARGIN, y + 4, TEXT_SMALL, label, MUTED);
                 canvas.draw_text(100, y, TEXT_MEDIUM, value, FOREGROUND);
             }
+        }
+    }
+
+    fn render_console(&self, canvas: &mut Canvas) {
+        title(canvas, "CONSOLE");
+        let rows = self.console_rows();
+        let lines = wrap(&self.console, CONSOLE_COLUMNS);
+        let end = lines.len().saturating_sub(self.console_scroll);
+        let start = end.saturating_sub(rows);
+        let height = rows as u32 * CONSOLE_LINE + 8;
+        canvas.fill(Rect { x: 0, y: CONSOLE_TOP - 4, width: WIDTH, height }, PANEL);
+        if lines.is_empty() {
+            canvas.draw_text(MARGIN, CONSOLE_TOP, TEXT_SMALL, "Type a command and RUN.", MUTED);
+            canvas.draw_text(MARGIN, CONSOLE_TOP + CONSOLE_LINE, TEXT_SMALL, "help lists them.", MUTED);
+        }
+        for (index, line) in lines[start..end].iter().enumerate() {
+            let color = if line.starts_with("a32> ") { ACCENT } else { FOREGROUND };
+            canvas.draw_text(MARGIN, CONSOLE_TOP + index as u32 * CONSOLE_LINE, TEXT_SMALL, line, color);
+        }
+        if self.console_scroll > 0 {
+            let text = format!("{} lines up", self.console_scroll);
+            let x = WIDTH - MARGIN - text.len() as u32 * CHAR_WIDTH * TEXT_SMALL;
+            canvas.draw_text(x, 76, TEXT_SMALL, &text, MUTED);
+        }
+        if self.console_keys {
+            // The end of the line being typed, then a cursor.
+            let shown = CONSOLE_COLUMNS.saturating_sub(3);
+            let characters: Vec<char> = self.command.chars().collect();
+            let tail: String = characters[characters.len().saturating_sub(shown)..].iter().collect();
+            canvas.fill(CONSOLE_INPUT.inset(2), BUTTON);
+            let y = CONSOLE_INPUT.y + (CONSOLE_INPUT.height - CHAR_HEIGHT * TEXT_SMALL) / 2;
+            canvas.draw_text(MARGIN, y, TEXT_SMALL, &format!("> {tail}_"), FOREGROUND);
         }
     }
 
@@ -922,8 +1123,8 @@ mod tests {
         assert_eq!(ui.press_at((4, (NETWORK_ROW_TOP + 5) as i32)), None);
 
         let ui = Ui::default();
-        for index in 0..3 {
-            let left = split(BOTTOM_ROW, 4, index);
+        for index in 0..4 {
+            let left = split(BOTTOM_ROW, 5, index);
             let gap = left.x + left.width + BUTTON_GAP / 2;
             assert_eq!(ui.press_at((gap as i32, (BOTTOM_ROW.y + 5) as i32)), None);
         }
@@ -1019,6 +1220,8 @@ mod tests {
             (Page::ConfirmRemoveSensor, Layer::Lower),
         ];
         pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
+        pages.extend(keyboards.map(|layer| (Page::Console, layer)));
+        pages.push((Page::Camera, Layer::Lower));
         for (page, layer) in pages {
             ui.page = page;
             ui.layer = layer;
@@ -1052,6 +1255,7 @@ mod tests {
         .map(|page| (page, Layer::Lower))
         .to_vec();
         pages.extend(keyboards.map(|layer| (Page::Keyboard, layer)));
+        pages.extend(keyboards.map(|layer| (Page::Console, layer)));
         for (page, layer) in pages {
             ui.page = page;
             ui.layer = layer;
@@ -1087,6 +1291,7 @@ mod tests {
             Page::AddSensor,
             Page::ConfirmRemoveSensor,
             Page::Camera,
+            Page::Console,
         ] {
             ui.page = page;
             ui.typed = "x".repeat(PASSPHRASE_LIMIT);
@@ -1199,5 +1404,93 @@ mod tests {
         assert_eq!(ui.page, Page::Bluetooth);
         assert!(tap_button(&mut ui, Press::Home).is_none());
         assert_eq!(ui.page, Page::Home);
+    }
+
+    #[test]
+    fn console_runs_typed_commands_and_shows_output() {
+        let mut ui = Ui::default();
+        assert!(tap_button(&mut ui, Press::OpenConsole).is_none());
+        assert_eq!(ui.page, Page::Console);
+        // An empty line runs nothing.
+        assert!(tap_button(&mut ui, Press::Run).is_none());
+        type_text(&mut ui, "ls /data");
+        assert_eq!(ui.command, "ls /data");
+        assert!(ui.typed.is_empty(), "the passphrase is separate");
+        match tap_button(&mut ui, Press::Run) {
+            Some(Request::Console(line)) => assert_eq!(line, "ls /data"),
+            _ => panic!("expected a console request"),
+        }
+        assert!(ui.command.is_empty());
+        assert_eq!(ui.message, "Running...");
+        ui.add_console_output("a32\nlog\tdir\n\u{1b}[0m");
+        assert!(ui.message.is_empty());
+        assert_eq!(ui.console, ["a32> ls /data", "a32", "log    dir", "?[0m"]);
+
+        // LAST goes back through earlier commands, then starts again.
+        type_text(&mut ui, "wifi");
+        tap_button(&mut ui, Press::Run);
+        tap_button(&mut ui, Press::Delete);
+        tap_button(&mut ui, Press::LastCommand);
+        assert_eq!(ui.command, "wifi");
+        tap_button(&mut ui, Press::LastCommand);
+        assert_eq!(ui.command, "ls /data");
+        tap_button(&mut ui, Press::LastCommand);
+        assert_eq!(ui.command, "wifi");
+        tap_button(&mut ui, Press::Delete);
+        assert_eq!(ui.command, "wif");
+
+        // The screen turning off forgets it all, since output can hold a password.
+        ui.reset();
+        assert!(ui.console.is_empty() && ui.history.is_empty() && ui.command.is_empty());
+    }
+
+    #[test]
+    fn console_output_scrolls_and_is_limited() {
+        let mut ui = Ui { page: Page::Console, ..Ui::default() };
+        let text: String = (0..100).map(|index| format!("line {index}\n")).collect();
+        ui.add_console_output(&text);
+        tap_button(&mut ui, Press::ToggleConsoleKeys);
+        assert!(!ui.console_keys);
+        let rows = ui.console_rows();
+        tap_button(&mut ui, Press::ScrollUp);
+        assert_eq!(ui.console_scroll, rows - 1);
+        for _ in 0..20 {
+            tap_button(&mut ui, Press::ScrollUp);
+        }
+        assert_eq!(ui.console_scroll, 100 - rows, "stops at the first line");
+        tap_button(&mut ui, Press::ScrollDown);
+        assert_eq!(ui.console_scroll, 100 - rows - (rows - 1));
+        // New output shows the end again.
+        ui.add_console_output("more");
+        assert_eq!(ui.console_scroll, 0);
+        // Long lines wrap; old lines are dropped past the limit.
+        let long = "x".repeat(CONSOLE_COLUMNS * 2 + 1);
+        assert_eq!(wrap(&[long, String::new()], CONSOLE_COLUMNS).len(), 4);
+        let text = ["  info      show kernel, SoC and memory".to_string()];
+        assert_eq!(wrap(&text, 20), ["  info      show", "kernel, SoC and", "memory"]);
+        assert_eq!(wrap(&["  abcdefghij".to_string()], 6), ["  abcd", "efghij"]);
+        ui.add_console_output(&"y\n".repeat(CONSOLE_KEEP + 5));
+        assert_eq!(ui.console.len(), CONSOLE_KEEP);
+        // Both layouts render, with the output scrolled and not.
+        use crate::display::tests::rgba8888;
+        let mut canvas = Canvas::new(rgba8888());
+        ui.console_scroll = 3;
+        ui.render(&mut canvas, &Snapshot::default());
+        tap_button(&mut ui, Press::ToggleConsoleKeys);
+        ui.command = "z".repeat(COMMAND_LIMIT);
+        ui.render(&mut canvas, &Snapshot::default());
+    }
+
+    #[test]
+    fn console_buttons_without_the_keyboard_fit() {
+        let ui = Ui { page: Page::Console, console_keys: false, ..Ui::default() };
+        let buttons = ui.buttons();
+        for (index, button) in buttons.iter().enumerate() {
+            let width = (button.label.chars().count() as u32 * CHAR_WIDTH - 1) * button.scale;
+            assert!(width <= button.area.width, "{:?}", button.label);
+            for other in &buttons[index + 1..] {
+                assert!(!button.area.overlaps(other.area));
+            }
+        }
     }
 }

@@ -315,6 +315,8 @@ enum PanelInput {
     Message(String),
     /// A photo for the camera page.
     Photo(photo::Rgb),
+    /// Output of a command run from the console page.
+    Console(String),
 }
 
 /// Where `ui tap` sends its touches, set once the panel is running.
@@ -1205,6 +1207,12 @@ fn run_status_screen() -> io::Result<()> {
                         last_use = Instant::now();
                         panel.set_photo(&image);
                     }
+                    // Dropped if the screen went dark meanwhile, like what was typed.
+                    PanelInput::Console(output) if SCREEN_ON.load(Ordering::Acquire) => {
+                        last_use = Instant::now();
+                        panel.add_console_output(&output);
+                    }
+                    PanelInput::Console(_) => {}
                     PanelInput::Message(message) => {
                         last_use = Instant::now();
                         panel.set_message(message);
@@ -1425,6 +1433,17 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                 Ok(text) => say(text),
                 Err(err) => say(format!("Not removed: {err}")),
             },
+            Request::Console(line) => {
+                // Only the command name is logged: the rest can hold a password.
+                let name = line.split_whitespace().next().unwrap_or_default();
+                log(&format!("panel: console runs {name}"));
+                let mut output = Vec::new();
+                let _ = shell::execute(&line, &mut output, &KernelPlatform);
+                if output.is_empty() {
+                    output.extend_from_slice(b"(no output)\n");
+                }
+                let _ = replies.send(PanelInput::Console(String::from_utf8_lossy(&output).into_owned()));
+            }
             Request::Photo(camera) => match take_photo(camera) {
                 Ok(photo) => {
                     say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));
