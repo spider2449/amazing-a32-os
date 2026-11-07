@@ -439,8 +439,10 @@ const REBOOT_CMD_RESTART: c_ulong = 0x0123_4567;
 const REBOOT_CMD_RESTART2: c_ulong = 0xa1b2_c3d4;
 const REBOOT_CMD_POWER_OFF: c_ulong = 0x4321_fedc;
 
-/// Filesystems as (fstype, mount point). `/dev` must come first for logging.
+/// Host name for shell prompts and sshd, replacing the kernel's "(none)".
 const HOSTNAME: &str = "a32";
+
+/// Filesystems as (fstype, mount point). `/dev` must come first for logging.
 const MOUNTS: &[(&str, &str)] = &[
     ("tmpfs", "/dev"),
     ("devpts", "/dev/pts"),

@@ -104,7 +104,8 @@ unpacks it on the computer, because the stock `gzip` could not decompress and `t
 no `gunzip` to call. It sends the `.tar` with `recv`, which has no authentication, then
 reads the file back over the serial console and compares the hash before unpacking.
 
-SSH takes only keys for root. Test results, from RAM boots of Alpine 3.24.3:
+The init names the host `a32`, so shell prompts no longer show the kernel's `(none)`;
+`hostname` read `a32` on a RAM boot and after flashing. SSH takes only keys for root. Test results, from RAM boots of Alpine 3.24.3:
 
 - A listed key logged in and got a terminal. An unlisted key, a removed key and a
   password attempt were all refused.
