@@ -931,7 +931,8 @@ by row: fitting took 28 and 49 ms, and the panel drew 13.8 fps of 16.0 (rear) an
 10.6 of 12.7 (front). The first build never
 drew a frame, because the panel loop handled every queued event before drawing and
 live frames kept arriving; it now handles only what was queued when it woke.
-After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it.
+After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it; with the faster
+fitting, a flashed rear view drew 13.7 fps of 14.2.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
