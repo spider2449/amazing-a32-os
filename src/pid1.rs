@@ -315,11 +315,64 @@ enum PanelInput {
     Message(String),
     /// A photo for the camera page.
     Photo(photo::Rgb),
-    /// Output of a command run from the console page.
-    Console(String),
+    /// What the console's shell wrote, and that it ended.
+    TerminalOutput(Vec<u8>),
+    TerminalEnded,
 }
 
-/// Where `ui tap` sends its touches, set once the panel is running.
+/// The shell of the panel's console, on a pseudo-terminal.
+struct ConsoleShell {
+    master: File,
+    child: std::process::Child,
+}
+
+impl ConsoleShell {
+    /// Starts Alpine's shell, with a thread passing its output to the panel.
+    fn start(columns: usize, rows: usize, panel: mpsc::Sender<PanelInput>) -> io::Result<Self> {
+        let (master, child) = alpine::start_shell(columns, rows)?;
+        let mut output = master.try_clone()?;
+        log(&format!("panel: console shell started as {}", child.id()));
+        thread::Builder::new().spawn(move || {
+            let mut buffer = [0u8; 4096];
+            // Reading fails with EIO once the shell and everything it started end.
+            while let Ok(length @ 1..) = output.read(&mut buffer) {
+                if panel.send(PanelInput::TerminalOutput(buffer[..length].to_vec())).is_err() {
+                    return;
+                }
+            }
+            let _ = panel.send(PanelInput::TerminalEnded);
+        })?;
+        Ok(ConsoleShell { master, child })
+    }
+}
+
+/// Acts on the console page's requests: they need the shell at once, so they are
+/// not queued behind slow work.
+fn console_request(shell: &mut Option<ConsoleShell>, panel: &mut Ui, request: Request, input: &mpsc::Sender<PanelInput>) {
+    let (columns, rows) = panel.terminal_dimensions();
+    if shell.is_none() {
+        match ConsoleShell::start(columns, rows, input.clone()) {
+            Ok(started) => *shell = Some(started),
+            Err(err) => {
+                log(&format!("panel: console shell not started: {err}"));
+                panel.terminal_note(&format!("[the shell did not start: {err}]"));
+                return;
+            }
+        }
+    }
+    let Some(running) = shell else { return };
+    let result = match request {
+        Request::TerminalSize { columns, rows } => alpine::set_terminal_size(&running.master, columns, rows),
+        Request::TerminalInput(bytes) => running.master.write_all(&bytes),
+        _ => Ok(()),
+    };
+    // A shell that just ended is reported by its output thread.
+    if let Err(err) = result {
+        log(&format!("panel: console write failed: {err}"));
+    }
+}
+
+/// Where `ui tap` and `ui drag` send their touches, set once the panel is running.
 static PANEL_INPUT: OnceLock<mpsc::Sender<PanelInput>> = OnceLock::new();
 
 /// Set when /data is a mounted filesystem, not a directory in memory.
@@ -1156,6 +1209,7 @@ fn run_status_screen() -> io::Result<()> {
 
     let mut canvas = Canvas::new(format);
     let mut panel = Ui::default();
+    let mut shell: Option<ConsoleShell> = None;
     let mut last_use = Instant::now();
     let mut was_on = true;
     // A touch that wakes the screen must not also press a button under the finger.
@@ -1198,8 +1252,24 @@ fn run_status_screen() -> io::Result<()> {
                             waking = position.is_some();
                             continue;
                         }
-                        if let Some(request) = panel.touch(position) {
-                            let _ = requests.send(request);
+                        match panel.touch(position) {
+                            Some(request @ (Request::TerminalSize { .. } | Request::TerminalInput(_))) => {
+                                console_request(&mut shell, &mut panel, request, &input);
+                            }
+                            Some(request) => {
+                                let _ = requests.send(request);
+                            }
+                            None => {}
+                        }
+                    }
+                    // Output does not keep the screen on: a program like `top`
+                    // would never let it turn off.
+                    PanelInput::TerminalOutput(bytes) => panel.terminal_output(&bytes),
+                    PanelInput::TerminalEnded => {
+                        if let Some(mut ended) = shell.take() {
+                            let status = ended.child.wait().map_or_else(|err| err.to_string(), |status| status.to_string());
+                            log(&format!("panel: console shell ended: {status}"));
+                            panel.terminal_note(&format!("[the shell ended: {status}; type to start a new one]"));
                         }
                     }
                     PanelInput::Networks(networks) => panel.set_networks(networks),
@@ -1207,12 +1277,6 @@ fn run_status_screen() -> io::Result<()> {
                         last_use = Instant::now();
                         panel.set_photo(&image);
                     }
-                    // Dropped if the screen went dark meanwhile, like what was typed.
-                    PanelInput::Console(output) if SCREEN_ON.load(Ordering::Acquire) => {
-                        last_use = Instant::now();
-                        panel.add_console_output(&output);
-                    }
-                    PanelInput::Console(_) => {}
                     PanelInput::Message(message) => {
                         last_use = Instant::now();
                         panel.set_message(message);
@@ -1433,17 +1497,8 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                 Ok(text) => say(text),
                 Err(err) => say(format!("Not removed: {err}")),
             },
-            Request::Console(line) => {
-                // Only the command name is logged: the rest can hold a password.
-                let name = line.split_whitespace().next().unwrap_or_default();
-                log(&format!("panel: console runs {name}"));
-                let mut output = Vec::new();
-                let _ = shell::execute(&line, &mut output, &KernelPlatform);
-                if output.is_empty() {
-                    output.extend_from_slice(b"(no output)\n");
-                }
-                let _ = replies.send(PanelInput::Console(String::from_utf8_lossy(&output).into_owned()));
-            }
+            // Handled by the panel loop, which owns the shell; never sent here.
+            Request::TerminalSize { .. } | Request::TerminalInput(_) => {}
             Request::Photo(camera) => match take_photo(camera) {
                 Ok(photo) => {
                     say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));
@@ -2278,9 +2333,9 @@ impl Platform for KernelPlatform {
         }
     }
 
-    fn tap(&self, x: i32, y: i32) -> io::Result<()> {
+    fn touch(&self, path: &[(i32, i32)]) -> io::Result<()> {
         let panel = PANEL_INPUT.get().ok_or_else(|| io::Error::other("the panel is not running"))?;
-        for position in [Some((x, y)), None] {
+        for position in path.iter().copied().map(Some).chain([None]) {
             panel.send(PanelInput::Touch(position)).map_err(io::Error::other)?;
         }
         Ok(())

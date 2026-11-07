@@ -3,6 +3,7 @@
 
 use crate::display::{Canvas, Rect, Rgb, ACCENT, BACKGROUND, FOREGROUND};
 use crate::photo;
+use crate::terminal::{key_bytes, Terminal};
 use crate::wifi::{self, Credentials, Network};
 
 const PANEL: Rgb = Rgb(28, 38, 54);
@@ -42,16 +43,18 @@ const SENSOR_ROW_HEIGHT: u32 = 58;
 const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
 /// Where the camera page shows its photo: a 3:4 portrait photo fills it.
 const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
-/// The console page: output lines above the line being typed and the keyboard,
-/// or down to the bottom row with the keyboard hidden.
-const COMMAND_LIMIT: usize = 200;
-const CONSOLE_KEEP: usize = 2000;
-const CONSOLE_TOP: u32 = 96;
-const CONSOLE_LINE: u32 = 18;
-const CONSOLE_INPUT: Rect = Rect { x: 0, y: 380, width: WIDTH, height: 52 };
-const CONSOLE_COLUMNS: usize = ((WIDTH - MARGIN * 2) / (CHAR_WIDTH * TEXT_SMALL)) as usize;
-/// Commands kept for LAST.
-const HISTORY_KEEP: usize = 20;
+const HEIGHT: u32 = 854;
+
+// The console page: a header with two buttons, the terminal, and a keyboard of
+// five short rows at the bottom, which can be hidden to show more lines.
+const TERMINAL_LEFT: u32 = 6;
+const TERMINAL_TOP: u32 = 52;
+const TERMINAL_LINE: u32 = 18;
+const TERMINAL_COLUMNS: usize = ((WIDTH - TERMINAL_LEFT * 2) / (CHAR_WIDTH * TEXT_SMALL)) as usize;
+const TERMINAL_KEY_HEIGHT: u32 = 52;
+const TERMINAL_KEYS_TOP: u32 = HEIGHT - 5 * TERMINAL_KEY_HEIGHT;
+const HIDE_KEYS: Rect = Rect { x: 258, y: 2, width: 106, height: 40 };
+const LEAVE_CONSOLE: Rect = Rect { x: 368, y: 2, width: 106, height: 40 };
 
 const LOWER: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const UPPER: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
@@ -104,8 +107,10 @@ pub enum Request {
     RemoveSensor(String),
     /// Takes a photo with the named camera, "rear" or "front".
     Photo(&'static str),
-    /// Runs a line as the serial console would.
-    Console(String),
+    /// Starts the console's shell if it is not running, and gives it this size.
+    TerminalSize { columns: usize, rows: usize },
+    /// What was typed on the console page, for the shell.
+    TerminalInput(Vec<u8>),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -174,13 +179,15 @@ enum Press {
     OpenCamera,
     Photo(&'static str),
     OpenConsole,
-    Run,
-    /// Brings back an earlier command, one further back each time.
-    LastCommand,
-    /// Hides or shows the keyboard, to see more output.
+    /// Hides or shows the console's keyboard.
     ToggleConsoleKeys,
-    ScrollUp,
-    ScrollDown,
+    /// The console's own keys: Ctrl for the next key, Esc, Tab, Enter, and the
+    /// arrows by the letter of their escape sequence (A up, B down, C right, D left).
+    Control,
+    Escape,
+    Tab,
+    Enter,
+    Arrow(u8),
 }
 
 struct Button {
@@ -233,15 +240,14 @@ pub struct Ui {
     sensor_target: Option<String>,
     /// The last photo, already sized for the camera page.
     photo: Option<photo::Rgb>,
-    /// The console page: the line being typed, earlier commands (newest last) and
-    /// how far LAST has gone back, the output so far, whether the keyboard shows,
-    /// and how many wrapped lines the view is scrolled up from the end.
-    command: String,
-    history: Vec<String>,
-    history_back: usize,
-    console: Vec<String>,
+    /// The console page: the shell's output, whether the keyboard shows, whether
+    /// Ctrl is held for the next key, how many lines the view is scrolled back,
+    /// and while a finger drags the text, where it started and the scroll then.
+    terminal: Terminal,
     console_keys: bool,
+    control: bool,
     console_scroll: usize,
+    drag: Option<(i32, usize)>,
 }
 
 impl Default for Ui {
@@ -261,40 +267,19 @@ impl Default for Ui {
             candidates: Vec::new(),
             sensor_target: None,
             photo: None,
-            command: String::new(),
-            history: Vec::new(),
-            history_back: 0,
-            console: Vec::new(),
+            terminal: Terminal::new(TERMINAL_COLUMNS, terminal_rows(true)),
             console_keys: true,
+            control: false,
             console_scroll: 0,
+            drag: None,
         }
     }
 }
 
-/// Splits lines into screen lines of at most `columns` characters, at a space
-/// where there is one past the line's indentation, otherwise anywhere.
-fn wrap(lines: &[String], columns: usize) -> Vec<String> {
-    let columns = columns.max(1);
-    let mut out = Vec::new();
-    for line in lines {
-        let mut rest: Vec<char> = line.chars().collect();
-        if rest.is_empty() {
-            out.push(String::new());
-        }
-        while !rest.is_empty() {
-            if rest.len() <= columns {
-                out.push(rest.iter().collect());
-                break;
-            }
-            let indent = rest.iter().take_while(|character| **character == ' ').count();
-            let cut = (indent + 1..=columns).rev().find(|&at| rest[at] == ' ').unwrap_or(columns);
-            out.push(rest[..cut].iter().collect::<String>().trim_end().to_string());
-            // The spaces at the break are not carried to the next line.
-            let next = (cut..rest.len()).find(|&at| rest[at] != ' ').unwrap_or(rest.len());
-            rest.drain(..next);
-        }
-    }
-    out
+/// How many lines the console shows, with or without the keyboard.
+fn terminal_rows(keys: bool) -> usize {
+    let bottom = if keys { TERMINAL_KEYS_TOP } else { HEIGHT };
+    ((bottom - 6 - TERMINAL_TOP) / TERMINAL_LINE) as usize
 }
 
 impl Ui {
@@ -317,21 +302,40 @@ impl Ui {
         self.photo = Some(photo::fit(image, PHOTO_AREA.width as usize, PHOTO_AREA.height as usize));
     }
 
-    /// Adds a command's output to the console page and shows its end. Tabs become
-    /// spaces and other characters the font lacks become `?`.
-    pub fn add_console_output(&mut self, text: &str) {
-        for line in text.lines() {
-            let line = line
-                .replace('\t', "    ")
-                .chars()
-                .map(|character| if (' '..='~').contains(&character) { character } else { '?' })
-                .collect();
-            self.console.push(line);
+    /// Output from the console's shell. A view scrolled back stays on the same lines.
+    pub fn terminal_output(&mut self, bytes: &[u8]) {
+        let added = self.terminal.feed(bytes);
+        if self.console_scroll > 0 {
+            self.console_scroll = (self.console_scroll + added).min(self.max_scroll());
         }
-        let excess = self.console.len().saturating_sub(CONSOLE_KEEP);
-        self.console.drain(..excess);
+    }
+
+    /// A note from this system on the console, such as that the shell ended.
+    pub fn terminal_note(&mut self, text: &str) {
+        self.terminal.note(text);
         self.console_scroll = 0;
-        self.message.clear();
+    }
+
+    /// The furthest the console can scroll back: to its first line at the top.
+    fn max_scroll(&self) -> usize {
+        self.terminal.lines().len().saturating_sub(self.terminal.rows())
+    }
+
+    /// The console's columns and rows now.
+    pub fn terminal_dimensions(&self) -> (usize, usize) {
+        (self.terminal.columns(), self.terminal.rows())
+    }
+
+    /// The console's size request, for when it opens or the keyboard changes.
+    fn terminal_size(&self) -> Request {
+        Request::TerminalSize { columns: self.terminal.columns(), rows: self.terminal.rows() }
+    }
+
+    /// Bytes for the shell; typing also brings the view back to the end.
+    fn send(&mut self, bytes: Vec<u8>) -> Option<Request> {
+        self.control = false;
+        self.console_scroll = 0;
+        Some(Request::TerminalInput(bytes))
     }
 
     /// Back to the home page, without anything typed. Used when the screen turns off,
@@ -344,19 +348,6 @@ impl Ui {
         // A photo should not wait on a dark screen for the next person to wake it.
         self.photo = None;
         self.clear_typed();
-        // Nor console commands and output, which can hold a password.
-        self.command.clear();
-        self.history.clear();
-        self.history_back = 0;
-        self.console.clear();
-        self.console_keys = true;
-        self.console_scroll = 0;
-    }
-
-    /// How many output lines the console page shows now.
-    fn console_rows(&self) -> usize {
-        let bottom = if self.console_keys { CONSOLE_INPUT.y } else { BOTTOM_ROW.y };
-        ((bottom - 8 - CONSOLE_TOP) / CONSOLE_LINE) as usize
     }
 
     fn clear_typed(&mut self) {
@@ -374,12 +365,28 @@ impl Ui {
                 if !self.finger_down {
                     self.finger_down = true;
                     self.pressed = self.press_at(position);
+                    // On the console's text, a finger drags the view instead.
+                    let text_bottom = if self.console_keys { TERMINAL_KEYS_TOP } else { HEIGHT };
+                    if self.page == Page::Console
+                        && self.pressed.is_none()
+                        && position.1 >= TERMINAL_TOP as i32 - 6
+                        && position.1 < text_bottom as i32
+                    {
+                        self.drag = Some((position.1, self.console_scroll));
+                    }
+                }
+                if let Some((start, scroll)) = self.drag {
+                    // Pulling the text down shows earlier lines.
+                    let lines = (position.1 - start) / TERMINAL_LINE as i32;
+                    let wanted = scroll as i64 + i64::from(lines);
+                    self.console_scroll = wanted.clamp(0, self.max_scroll() as i64) as usize;
                 }
                 self.position = position;
                 None
             }
             None => {
                 self.finger_down = false;
+                self.drag = None;
                 let pressed = self.pressed.take()?;
                 if self.press_at(self.position) == Some(pressed) {
                     self.act(pressed)
@@ -481,14 +488,26 @@ impl Ui {
                     self.page = Page::Keyboard;
                 }
             }
+            Press::OpenConsole => {
+                self.page = Page::Console;
+                return Some(self.terminal_size());
+            }
+            Press::ToggleConsoleKeys => {
+                self.console_keys = !self.console_keys;
+                self.terminal.resize(TERMINAL_COLUMNS, terminal_rows(self.console_keys));
+                self.console_scroll = self.console_scroll.min(self.max_scroll());
+                return Some(self.terminal_size());
+            }
+            Press::Control => self.control = !self.control,
+            Press::Escape => return self.send(vec![0x1B]),
+            Press::Tab => return self.send(vec![b'\t']),
+            Press::Enter => return self.send(vec![b'\r']),
+            Press::Arrow(letter) => return self.send(vec![0x1B, b'[', letter]),
             Press::Key(character) if self.page == Page::Console => {
-                if self.command.len() < COMMAND_LIMIT {
-                    self.command.push(character);
-                }
+                let bytes = key_bytes(character, self.control);
+                return self.send(bytes);
             }
-            Press::Delete if self.page == Page::Console => {
-                self.command.pop();
-            }
+            Press::Delete if self.page == Page::Console => return self.send(vec![0x7F]),
             Press::Key(character) => {
                 if self.typed.len() < PASSPHRASE_LIMIT {
                     self.typed.push(character);
@@ -497,42 +516,6 @@ impl Ui {
             }
             Press::Delete => {
                 self.typed.pop();
-            }
-            Press::OpenConsole => self.page = Page::Console,
-            Press::Run => {
-                let line = self.command.trim().to_string();
-                if !line.is_empty() {
-                    self.command.clear();
-                    self.console.push(format!("a32> {line}"));
-                    self.console_scroll = 0;
-                    self.history.retain(|earlier| *earlier != line);
-                    self.history.push(line.clone());
-                    let excess = self.history.len().saturating_sub(HISTORY_KEEP);
-                    self.history.drain(..excess);
-                    self.history_back = 0;
-                    self.message = "Running...".to_string();
-                    return Some(Request::Console(line));
-                }
-            }
-            Press::LastCommand => {
-                if !self.history.is_empty() {
-                    self.history_back = self.history_back % self.history.len() + 1;
-                    self.command = self.history[self.history.len() - self.history_back].clone();
-                }
-            }
-            Press::ToggleConsoleKeys => {
-                self.console_keys = !self.console_keys;
-                self.console_scroll = 0;
-            }
-            Press::ScrollUp | Press::ScrollDown => {
-                let rows = self.console_rows();
-                let total = wrap(&self.console, CONSOLE_COLUMNS).len();
-                let page = rows.saturating_sub(1).max(1);
-                self.console_scroll = if press == Press::ScrollUp {
-                    (self.console_scroll + page).min(total.saturating_sub(rows))
-                } else {
-                    self.console_scroll.saturating_sub(page)
-                };
             }
             Press::Shift => {
                 self.layer = match self.layer {
@@ -586,25 +569,7 @@ impl Ui {
                 ..Button::new(split(BOTTOM_ROW, 5, index as u32), label, press)
             })
             .collect(),
-            Page::Console if self.console_keys => {
-                let mut buttons = self.key_rows();
-                let row = Rect { x: 0, y: KEY_TOP + 3 * KEY_HEIGHT, width: WIDTH, height: KEY_HEIGHT };
-                let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
-                buttons.push(Button::new(split(row, 4, 0), symbols, Press::SwitchSymbols));
-                let space = Rect { width: split(row, 4, 2).x + split(row, 4, 2).width - split(row, 4, 1).x, ..split(row, 4, 1) };
-                buttons.push(Button::new(space, "SPACE", Press::Key(' ')));
-                buttons.push(Button::new(split(row, 4, 3), "RUN", Press::Run));
-                buttons.push(Button::new(split(BOTTOM_ROW, 3, 0), "LAST", Press::LastCommand));
-                buttons.push(Button::new(split(BOTTOM_ROW, 3, 1), "OUTPUT", Press::ToggleConsoleKeys));
-                buttons.push(Button::new(split(BOTTOM_ROW, 3, 2), "BACK", Press::Home));
-                buttons
-            }
-            Page::Console => vec![
-                Button::new(split(BOTTOM_ROW, 4, 0), "UP", Press::ScrollUp),
-                Button::new(split(BOTTOM_ROW, 4, 1), "DOWN", Press::ScrollDown),
-                Button::new(split(BOTTOM_ROW, 4, 2), "KEYS", Press::ToggleConsoleKeys),
-                Button::new(split(BOTTOM_ROW, 4, 3), "BACK", Press::Home),
-            ],
+            Page::Console => self.console_buttons(),
             Page::Camera => vec![
                 Button::new(split(BOTTOM_ROW, 3, 0), "REAR", Press::Photo("rear")),
                 Button::new(split(BOTTOM_ROW, 3, 1), "FRONT", Press::Photo("front")),
@@ -707,8 +672,50 @@ impl Ui {
         }
     }
 
+    fn console_buttons(&self) -> Vec<Button> {
+        let small = |area: Rect, label: &str, press: Press| Button { scale: TEXT_SMALL, ..Button::new(area, label, press) };
+        let mut buttons = vec![
+            small(HIDE_KEYS, if self.console_keys { "HIDE KEYS" } else { "KEYS" }, Press::ToggleConsoleKeys),
+            Button::new(LEAVE_CONSOLE, "BACK", Press::Home),
+        ];
+        if !self.console_keys {
+            return buttons;
+        }
+        let row = |index: u32| Rect {
+            x: 0,
+            y: TERMINAL_KEYS_TOP + index * TERMINAL_KEY_HEIGHT,
+            width: WIDTH,
+            height: TERMINAL_KEY_HEIGHT,
+        };
+        // The arrows as letters, since the font is ASCII.
+        let special = [
+            ("CTRL", Press::Control),
+            ("ESC", Press::Escape),
+            ("TAB", Press::Tab),
+            ("<", Press::Arrow(b'D')),
+            ("^", Press::Arrow(b'A')),
+            ("v", Press::Arrow(b'B')),
+            (">", Press::Arrow(b'C')),
+        ];
+        for (index, (label, press)) in special.into_iter().enumerate() {
+            let mut button = small(split(row(0), 7, index as u32), label, press);
+            if press == Press::Control && self.control {
+                button.color = PRESSED;
+            }
+            buttons.push(button);
+        }
+        buttons.extend(self.key_rows(row(1).y, TERMINAL_KEY_HEIGHT));
+        let last = row(4);
+        let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
+        buttons.push(Button::new(split(last, 4, 0), symbols, Press::SwitchSymbols));
+        let space = Rect { width: split(last, 4, 1).width * 2 + BUTTON_GAP, ..split(last, 4, 1) };
+        buttons.push(Button::new(space, "SPACE", Press::Key(' ')));
+        buttons.push(Button::new(split(last, 4, 3), "ENTER", Press::Enter));
+        buttons
+    }
+
     fn keyboard_buttons(&self) -> Vec<Button> {
-        let mut buttons = self.key_rows();
+        let mut buttons = self.key_rows(KEY_TOP, KEY_HEIGHT);
         let y = KEY_TOP + 3 * KEY_HEIGHT;
         let row = Rect { x: 0, y, width: WIDTH, height: KEY_HEIGHT };
         let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
@@ -728,18 +735,18 @@ impl Ui {
         buttons
     }
 
-    /// The three rows of character keys, with shift and delete.
-    fn key_rows(&self) -> Vec<Button> {
+    /// The three rows of character keys, with shift and delete, from `top`.
+    fn key_rows(&self, top: u32, height: u32) -> Vec<Button> {
         const KEY_WIDTH: u32 = WIDTH / 10;
         let mut buttons = Vec::new();
         let rows = self.layer.rows();
         for (row, keys) in rows.iter().enumerate() {
             let count = keys.chars().count() as u32;
-            let y = KEY_TOP + row as u32 * KEY_HEIGHT;
+            let y = top + row as u32 * height;
             let mut left = (WIDTH - count * KEY_WIDTH) / 2;
             if row == 2 {
                 buttons.push(Button::new(
-                    Rect { x: 0, y, width: left.max(KEY_WIDTH), height: KEY_HEIGHT },
+                    Rect { x: 0, y, width: left.max(KEY_WIDTH), height },
                     match self.layer {
                         Layer::Lower => "abc",
                         Layer::Upper => "ABC",
@@ -752,7 +759,7 @@ impl Ui {
             }
             for (index, key) in keys.chars().enumerate() {
                 buttons.push(Button::new(
-                    Rect { x: left + index as u32 * KEY_WIDTH, y, width: KEY_WIDTH, height: KEY_HEIGHT },
+                    Rect { x: left + index as u32 * KEY_WIDTH, y, width: KEY_WIDTH, height },
                     &key.to_string(),
                     Press::Key(key),
                 ));
@@ -760,7 +767,7 @@ impl Ui {
             if row == 2 {
                 let x = left + count * KEY_WIDTH;
                 buttons.push(Button::new(
-                    Rect { x, y, width: WIDTH - x, height: KEY_HEIGHT },
+                    Rect { x, y, width: WIDTH - x, height },
                     "DEL",
                     Press::Delete,
                 ));
@@ -842,7 +849,7 @@ impl Ui {
             canvas.fill(button.area.inset(2), color);
             canvas.draw_text_centered(button.area, button.scale, &button.label, FOREGROUND);
         }
-        if !self.message.is_empty() && self.page != Page::Home {
+        if !self.message.is_empty() && !matches!(self.page, Page::Home | Page::Console) {
             let y = if self.page == Page::Keyboard { 400 } else { 76 };
             canvas.draw_text(MARGIN, y, TEXT_SMALL, &self.message, ACCENT);
         }
@@ -893,34 +900,27 @@ impl Ui {
     }
 
     fn render_console(&self, canvas: &mut Canvas) {
-        title(canvas, "CONSOLE");
-        let rows = self.console_rows();
-        let lines = wrap(&self.console, CONSOLE_COLUMNS);
+        canvas.draw_text(MARGIN, 12, TEXT_MEDIUM, "CONSOLE", ACCENT);
+        if self.console_scroll > 0 {
+            canvas.draw_text(160, 16, TEXT_SMALL, &format!("{} up", self.console_scroll), MUTED);
+        }
+        let rows = self.terminal.rows();
+        let height = rows as u32 * TERMINAL_LINE + 8;
+        canvas.fill(Rect { x: 0, y: TERMINAL_TOP - 6, width: WIDTH, height }, PANEL);
+        let lines = self.terminal.lines();
         let end = lines.len().saturating_sub(self.console_scroll);
         let start = end.saturating_sub(rows);
-        let height = rows as u32 * CONSOLE_LINE + 8;
-        canvas.fill(Rect { x: 0, y: CONSOLE_TOP - 4, width: WIDTH, height }, PANEL);
-        if lines.is_empty() {
-            canvas.draw_text(MARGIN, CONSOLE_TOP, TEXT_SMALL, "Type a command and RUN.", MUTED);
-            canvas.draw_text(MARGIN, CONSOLE_TOP + CONSOLE_LINE, TEXT_SMALL, "help lists them.", MUTED);
-        }
         for (index, line) in lines[start..end].iter().enumerate() {
-            let color = if line.starts_with("a32> ") { ACCENT } else { FOREGROUND };
-            canvas.draw_text(MARGIN, CONSOLE_TOP + index as u32 * CONSOLE_LINE, TEXT_SMALL, line, color);
+            let text: String = line.iter().collect();
+            let y = TERMINAL_TOP + index as u32 * TERMINAL_LINE;
+            canvas.draw_text(TERMINAL_LEFT, y, TEXT_SMALL, &text, FOREGROUND);
         }
-        if self.console_scroll > 0 {
-            let text = format!("{} lines up", self.console_scroll);
-            let x = WIDTH - MARGIN - text.len() as u32 * CHAR_WIDTH * TEXT_SMALL;
-            canvas.draw_text(x, 76, TEXT_SMALL, &text, MUTED);
-        }
-        if self.console_keys {
-            // The end of the line being typed, then a cursor.
-            let shown = CONSOLE_COLUMNS.saturating_sub(3);
-            let characters: Vec<char> = self.command.chars().collect();
-            let tail: String = characters[characters.len().saturating_sub(shown)..].iter().collect();
-            canvas.fill(CONSOLE_INPUT.inset(2), BUTTON);
-            let y = CONSOLE_INPUT.y + (CONSOLE_INPUT.height - CHAR_HEIGHT * TEXT_SMALL) / 2;
-            canvas.draw_text(MARGIN, y, TEXT_SMALL, &format!("> {tail}_"), FOREGROUND);
+        // The cursor, as a bar under its character, while it is in view.
+        let (row, column) = self.terminal.cursor();
+        if (start..end).contains(&row) {
+            let x = TERMINAL_LEFT + column as u32 * CHAR_WIDTH * TEXT_SMALL;
+            let y = TERMINAL_TOP + (row - start) as u32 * TERMINAL_LINE + CHAR_HEIGHT * TEXT_SMALL + 1;
+            canvas.fill(Rect { x, y, width: (CHAR_WIDTH - 1) * TEXT_SMALL, height: 2 }, ACCENT);
         }
     }
 
@@ -1407,90 +1407,94 @@ mod tests {
     }
 
     #[test]
-    fn console_runs_typed_commands_and_shows_output() {
+    fn console_opens_the_shell_and_sends_keys() {
         let mut ui = Ui::default();
-        assert!(tap_button(&mut ui, Press::OpenConsole).is_none());
-        assert_eq!(ui.page, Page::Console);
-        // An empty line runs nothing.
-        assert!(tap_button(&mut ui, Press::Run).is_none());
-        type_text(&mut ui, "ls /data");
-        assert_eq!(ui.command, "ls /data");
-        assert!(ui.typed.is_empty(), "the passphrase is separate");
-        match tap_button(&mut ui, Press::Run) {
-            Some(Request::Console(line)) => assert_eq!(line, "ls /data"),
-            _ => panic!("expected a console request"),
+        match tap_button(&mut ui, Press::OpenConsole) {
+            Some(Request::TerminalSize { columns, rows }) => {
+                assert_eq!(columns, TERMINAL_COLUMNS);
+                assert_eq!(rows, terminal_rows(true));
+            }
+            _ => panic!("expected the shell to start"),
         }
-        assert!(ui.command.is_empty());
-        assert_eq!(ui.message, "Running...");
-        ui.add_console_output("a32\nlog\tdir\n\u{1b}[0m");
-        assert!(ui.message.is_empty());
-        assert_eq!(ui.console, ["a32> ls /data", "a32", "log    dir", "?[0m"]);
-
-        // LAST goes back through earlier commands, then starts again.
-        type_text(&mut ui, "wifi");
-        tap_button(&mut ui, Press::Run);
-        tap_button(&mut ui, Press::Delete);
-        tap_button(&mut ui, Press::LastCommand);
-        assert_eq!(ui.command, "wifi");
-        tap_button(&mut ui, Press::LastCommand);
-        assert_eq!(ui.command, "ls /data");
-        tap_button(&mut ui, Press::LastCommand);
-        assert_eq!(ui.command, "wifi");
-        tap_button(&mut ui, Press::Delete);
-        assert_eq!(ui.command, "wif");
-
-        // The screen turning off forgets it all, since output can hold a password.
-        ui.reset();
-        assert!(ui.console.is_empty() && ui.history.is_empty() && ui.command.is_empty());
+        assert_eq!(ui.page, Page::Console);
+        let sent = |request: Option<Request>| match request {
+            Some(Request::TerminalInput(bytes)) => bytes,
+            _ => panic!("expected input for the shell"),
+        };
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('l'))), b"l");
+        assert_eq!(sent(tap_button(&mut ui, Press::Delete)), [0x7F]);
+        assert_eq!(sent(tap_button(&mut ui, Press::Enter)), b"\r");
+        assert_eq!(sent(tap_button(&mut ui, Press::Tab)), b"\t");
+        assert_eq!(sent(tap_button(&mut ui, Press::Escape)), [0x1B]);
+        assert_eq!(sent(tap_button(&mut ui, Press::Arrow(b'A'))), b"\x1b[A");
+        // Ctrl applies to the next key only.
+        assert!(tap_button(&mut ui, Press::Control).is_none());
+        assert!(ui.control);
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('c'))), [3]);
+        assert!(!ui.control);
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('c'))), b"c");
+        // The Wi-Fi passphrase is not touched.
+        assert!(ui.typed.is_empty());
+        // Hiding the keyboard gives more lines, and the shell is told.
+        match tap_button(&mut ui, Press::ToggleConsoleKeys) {
+            Some(Request::TerminalSize { rows, .. }) => assert_eq!(rows, terminal_rows(false)),
+            _ => panic!("expected a new size"),
+        }
+        assert!(terminal_rows(false) > terminal_rows(true) + 10);
     }
 
     #[test]
-    fn console_output_scrolls_and_is_limited() {
+    fn dragging_the_console_scrolls_back() {
         let mut ui = Ui { page: Page::Console, ..Ui::default() };
-        let text: String = (0..100).map(|index| format!("line {index}\n")).collect();
-        ui.add_console_output(&text);
-        tap_button(&mut ui, Press::ToggleConsoleKeys);
-        assert!(!ui.console_keys);
-        let rows = ui.console_rows();
-        tap_button(&mut ui, Press::ScrollUp);
-        assert_eq!(ui.console_scroll, rows - 1);
-        for _ in 0..20 {
-            tap_button(&mut ui, Press::ScrollUp);
-        }
-        assert_eq!(ui.console_scroll, 100 - rows, "stops at the first line");
-        tap_button(&mut ui, Press::ScrollDown);
-        assert_eq!(ui.console_scroll, 100 - rows - (rows - 1));
-        // New output shows the end again.
-        ui.add_console_output("more");
+        let rows = ui.terminal.rows();
+        ui.terminal_output("line\r\n".repeat(100).as_bytes());
+        let total = ui.terminal.lines().len();
+        // Pull the text down by five lines.
+        let top = (TERMINAL_TOP + 20) as i32;
+        assert!(ui.touch(Some((200, top))).is_none());
+        assert!(ui.touch(Some((200, top + 5 * TERMINAL_LINE as i32))).is_none());
+        assert_eq!(ui.console_scroll, 5);
+        // A drag presses nothing when it ends.
+        assert!(ui.touch(None).is_none());
+        // It stops at the first line.
+        ui.touch(Some((200, top)));
+        ui.touch(Some((200, top + 400)));
+        ui.touch(Some((200, top + 4000)));
+        ui.touch(None);
+        assert_eq!(ui.console_scroll, total - rows);
+        // New output keeps a scrolled view on the same lines.
+        let before = ui.console_scroll;
+        ui.terminal_output(b"more\r\n");
+        assert_eq!(ui.console_scroll, before + 1);
+        // Typing shows the end again.
+        tap_button(&mut ui, Press::Key('x'));
         assert_eq!(ui.console_scroll, 0);
-        // Long lines wrap; old lines are dropped past the limit.
-        let long = "x".repeat(CONSOLE_COLUMNS * 2 + 1);
-        assert_eq!(wrap(&[long, String::new()], CONSOLE_COLUMNS).len(), 4);
-        let text = ["  info      show kernel, SoC and memory".to_string()];
-        assert_eq!(wrap(&text, 20), ["  info      show", "kernel, SoC and", "memory"]);
-        assert_eq!(wrap(&["  abcdefghij".to_string()], 6), ["  abcd", "efghij"]);
-        ui.add_console_output(&"y\n".repeat(CONSOLE_KEEP + 5));
-        assert_eq!(ui.console.len(), CONSOLE_KEEP);
-        // Both layouts render, with the output scrolled and not.
+        // A drag that starts on a key types nothing and scrolls nothing.
+        let key = ui.buttons().into_iter().find(|button| button.press == Press::Key('q')).unwrap().area;
+        let (x, y) = ((key.x + 5) as i32, (key.y + 5) as i32);
+        ui.touch(Some((x, y)));
+        ui.touch(Some((x, y - 300)));
+        assert!(ui.touch(None).is_none());
+        assert_eq!(ui.console_scroll, 0);
+    }
+
+    #[test]
+    fn console_renders_scrolled_with_and_without_keys() {
         use crate::display::tests::rgba8888;
         let mut canvas = Canvas::new(rgba8888());
-        ui.console_scroll = 3;
+        let mut ui = Ui { page: Page::Console, ..Ui::default() };
+        ui.terminal_output("x".repeat(5000).as_bytes());
+        ui.terminal_note("[the shell ended]");
+        ui.console_scroll = 7;
         ui.render(&mut canvas, &Snapshot::default());
         tap_button(&mut ui, Press::ToggleConsoleKeys);
-        ui.command = "z".repeat(COMMAND_LIMIT);
         ui.render(&mut canvas, &Snapshot::default());
-    }
-
-    #[test]
-    fn console_buttons_without_the_keyboard_fit() {
-        let ui = Ui { page: Page::Console, console_keys: false, ..Ui::default() };
+        // Without keys only the header buttons are left, and they fit.
         let buttons = ui.buttons();
-        for (index, button) in buttons.iter().enumerate() {
+        assert_eq!(buttons.len(), 2);
+        for button in &buttons {
             let width = (button.label.chars().count() as u32 * CHAR_WIDTH - 1) * button.scale;
             assert!(width <= button.area.width, "{:?}", button.label);
-            for other in &buttons[index + 1..] {
-                assert!(!button.area.overlaps(other.area));
-            }
         }
     }
 }

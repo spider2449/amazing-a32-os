@@ -34,6 +34,7 @@ const HELP: &str = "commands:
   bench write NEW_FILE         measure writes to a new file, then remove it
   bench display                measure drawing, with the screen off
   ui tap X Y                   act as if the screen were touched there
+  ui drag X1 Y1 X2 Y2          act as if a finger moved from one point to another
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
   camera rear|front NEW_FILE   take a photo and save it as a JPEG
@@ -60,8 +61,9 @@ pub trait Platform {
     fn dhcp(&self, interface: &str) -> io::Result<String>;
     /// Runs a performance measurement and returns its results.
     fn bench(&self, arguments: &[&str]) -> io::Result<String>;
-    /// Acts as if the screen were touched at this position, then released.
-    fn tap(&self, x: i32, y: i32) -> io::Result<()>;
+    /// Acts as if a finger touched the screen and moved through these positions,
+    /// then lifted.
+    fn touch(&self, path: &[(i32, i32)]) -> io::Result<()>;
     /// Describes the Wi-Fi state.
     fn wifi_status(&self) -> io::Result<String>;
     /// Joins a network, gets an address and describes the result.
@@ -92,8 +94,7 @@ pub fn run(input: impl BufRead, mut out: impl Write, platform: &impl Platform) -
     Ok(())
 }
 
-/// Runs one line, writing its output and any error to `out`. Fails only if `out` does.
-pub fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Result<()> {
+fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Result<()> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let result = match words.as_slice() {
         [] => Ok(()),
@@ -159,9 +160,15 @@ pub fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io
         }
         ["tcp", address] => try_tcp(address, out),
         ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
-            (Ok(x), Ok(y)) => platform.tap(x, y),
+            (Ok(x), Ok(y)) => platform.touch(&[(x, y)]),
             _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
         },
+        ["ui", "drag", numbers @ ..] if numbers.len() == 4 => {
+            match numbers.iter().map(|number| number.parse::<i32>()).collect::<Result<Vec<_>, _>>() {
+                Ok(n) => platform.touch(&drag_path((n[0], n[1]), (n[2], n[3]))),
+                Err(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "bad number")),
+            }
+        }
         ["bench", arguments @ ..] => {
             platform.bench(arguments).and_then(|text| out.write_all(text.as_bytes()))
         }
@@ -183,6 +190,11 @@ pub fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io
         writeln!(out, "error: {err}")?;
     }
     Ok(())
+}
+
+/// A finger's path from one point to another, in ten even steps.
+fn drag_path(from: (i32, i32), to: (i32, i32)) -> Vec<(i32, i32)> {
+    (0..=10).map(|step| (from.0 + (to.0 - from.0) * step / 10, from.1 + (to.1 - from.1) * step / 10)).collect()
 }
 
 /// Reports whether a TCP connection opens. No data is sent.
@@ -242,8 +254,9 @@ mod tests {
 "))
         }
 
-        fn tap(&self, x: i32, y: i32) -> io::Result<()> {
-            assert_eq!((x, y), (10, 20));
+        fn touch(&self, path: &[(i32, i32)]) -> io::Result<()> {
+            assert_eq!(path.first(), Some(&(10, 20)));
+            assert!(path.len() == 1 || path.last() == Some(&(30, 120)));
             Ok(())
         }
 
@@ -386,6 +399,9 @@ mod tests {
         assert_eq!(session("ui tap 10 20\n").0, "a32> a32> ");
         assert!(session("ui tap 10\n").0.contains("unknown command"));
         assert!(session("ui tap x 20\n").0.contains("error: bad number"));
+        assert_eq!(session("ui drag 10 20 30 120\n").0, "a32> a32> ");
+        assert!(session("ui drag 10 20 30\n").0.contains("unknown command"));
+        assert_eq!(drag_path((0, 0), (10, 100))[5], (5, 50));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::pid1::{cstring, log, run_child, stock_command, MS_BIND, MS_REC};
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -48,6 +49,8 @@ static PREPARED: Mutex<bool> = Mutex::new(false);
 
 extern "C" {
     fn chroot(path: *const c_char) -> c_int;
+    fn setsid() -> c_int;
+    fn ioctl(fd: c_int, request: c_int, ...) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn mount(
         source: *const c_char,
@@ -184,6 +187,66 @@ pub fn run_line(line: &str) -> io::Result<Vec<u8>> {
         text.extend(format!("[{status}]\n").into_bytes());
     }
     Ok(text)
+}
+
+// Pseudo-terminal requests, as numbered on ARM Linux.
+const TIOCSPTLCK: c_int = 0x4004_5431;
+const TIOCGPTN: c_int = 0x8004_5430u32 as c_int;
+const TIOCSWINSZ: c_int = 0x5414;
+const TIOCSCTTY: c_int = 0x540E;
+const O_NOCTTY: i32 = 0o400;
+
+/// Starts Alpine's login shell on a new pseudo-terminal of this size, for the
+/// panel's console. Returns the terminal's master side, which carries what the
+/// shell writes and takes what is typed, and the shell process.
+pub fn start_shell(columns: usize, rows: usize) -> io::Result<(File, std::process::Child)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    prepare()?;
+    let master = File::options().read(true).write(true).custom_flags(O_NOCTTY).open("/dev/ptmx")?;
+    let mut unlock: c_int = 0;
+    let mut number: u32 = 0;
+    // SAFETY: both requests take a pointer to an int, valid for the call.
+    unsafe {
+        if ioctl(master.as_raw_fd(), TIOCSPTLCK, &mut unlock as *mut c_int) != 0
+            || ioctl(master.as_raw_fd(), TIOCGPTN, &mut number as *mut u32) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    set_terminal_size(&master, columns, rows)?;
+    let follower = File::options().read(true).write(true).custom_flags(O_NOCTTY).open(format!("/dev/pts/{number}"))?;
+    let mut command = chroot_command(SHELL)?;
+    command
+        .arg("-l")
+        .env("TERM", "vt100")
+        .env("SHELL", SHELL)
+        .env("USER", "root")
+        .stdin(follower.try_clone()?)
+        .stdout(follower.try_clone()?)
+        .stderr(follower);
+    // SAFETY: only async-signal-safe system calls, after the standard streams are
+    // in place: a new session, with the terminal on stdin as its controlling one.
+    unsafe {
+        command.pre_exec(|| {
+            if setsid() < 0 || ioctl(0, TIOCSCTTY, 0 as c_int) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn()?;
+    Ok((master, child))
+}
+
+/// Tells the terminal, and so the programs on it, how big it is.
+pub fn set_terminal_size(master: &File, columns: usize, rows: usize) -> io::Result<()> {
+    // struct winsize: rows, columns, then the size in pixels, unused here.
+    let mut size: [u16; 4] = [rows as u16, columns as u16, 0, 0];
+    // SAFETY: the request reads a struct winsize, which `size` matches.
+    if unsafe { ioctl(master.as_raw_fd(), TIOCSWINSZ, size.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub fn ssh_running() -> bool {

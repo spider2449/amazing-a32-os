@@ -515,8 +515,8 @@ the phone off. Without USB it stays off until the key starts it again.
 The screen is a panel, drawn by the init with no other graphics software. The home page
 shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
 power off the phone, scan for and join a WPA2 network with an on-screen keyboard, and turn
-the BLE scan on or off, take photos, and run console commands. The Bluetooth page shows the scan's state, up to 4 sensors with their
-values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
+the BLE scan on or off, take photos, and give a Linux shell. The Bluetooth page shows the
+scan's state, up to 4 sensors with their values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
 because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
 in a different place, so a double tap cannot confirm by accident.
@@ -529,17 +529,24 @@ seconds powers off, as before. The RESTART and POWER OFF buttons were each teste
 the network.
 
 The home page's buttons are WI-FI, BLE, CAMERA, CONSOLE and POWER, in small letters
-so that five fit. The CONSOLE page runs the serial console's commands (`help` lists
-them), typed with the on-screen keyboard: RUN runs the line, LAST brings back earlier
-ones, and OUTPUT hides the keyboard to show 36 lines instead of 15, with UP and DOWN
-to scroll. Long lines wrap at spaces. A command runs on the panel's worker thread, so the
-screen keeps answering, but the next request waits for it. Only the command's name is
-logged, since the rest can be a password. Turning the screen off clears the commands
-and output, and output that arrives while it is off is dropped. Anyone holding the
-phone can therefore run commands as root, as the USB serial console already allows.
-Checked on a RAM boot with `ui tap` and screenshots: `info` and `help`, the hidden
-keyboard and scrolling. After flashing, the page answered a mistyped command with the
-console's "unknown command" line.
+so that five fit. CONSOLE is a terminal with Alpine's login shell (`/bin/sh -l` in the
+chroot, as root, `TERM=vt100`) on a pseudo-terminal, 39 columns wide. The init's own
+commands stay on the USB serial console. The page has a small terminal emulator
+(`src/terminal.rs`) that handles what a shell and line-based programs use: CR, LF,
+backspace, tab, cursor moves and erasing; colors are dropped and other characters
+than ASCII show as `?`. Full-screen programs such as `vi` or `top` will not draw
+properly. Dragging the text with a finger scrolls back through the last 3000 lines,
+and the header says how far; typing returns to the end. The keyboard has five rows
+52 px high: CTRL (for the next key, so CTRL then `c` is Ctrl-C), ESC, TAB and the
+arrows; three rows of keys; and 123, SPACE and ENTER. HIDE KEYS shows 44 lines
+instead of 29 and tells the shell the new size. The shell starts when the page first
+opens and keeps running when the page or the screen closes, so earlier output stays
+for scrolling back. After `exit` the page says so, and the next key starts a new
+shell. Output does not keep the screen on. Nothing typed is logged. Anyone holding
+the phone can run commands as root, as the USB serial console already allows.
+Checked on a RAM boot with `ui tap`, `ui drag` and screenshots: `ls /`, `dmesg`
+scrolled back 16 lines by a drag, the keyboard hidden, the up arrow bringing back
+`dmesg`, and CTRL then `c` cancelling it.
 
 The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
 enterprise networks are not listed, because this system cannot join them. Text is ASCII, so
@@ -554,8 +561,8 @@ frames: one showed a device twice, while `/bluetooth.json` had no repeated addre
 Touch coordinates match the 480x854 display without calibration: the top left corner read
 `4,4` and the bottom right `476,850`.
 
-To check the panel from the computer, `ui tap X Y` on the console acts like a finger, and
-this saves the screen. A saved screen can show a passphrase, so delete it after use:
+To check the panel from the computer, `ui tap X Y` on the console acts like a finger,
+`ui drag X1 Y1 X2 Y2` moves one, and this saves the screen. A saved screen can show a passphrase, so delete it after use:
 
 ```powershell
 scripts/screenshot.ps1 -OutFile target/screen.png

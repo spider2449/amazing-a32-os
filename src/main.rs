@@ -46,6 +46,7 @@ mod thermal;
 #[cfg(any(target_os = "linux", test))]
 mod transfer;
 #[cfg(any(target_os = "linux", test))]
+mod terminal;
 mod ui;
 #[cfg(any(target_os = "linux", test))]
 mod usb;
