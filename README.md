@@ -534,9 +534,19 @@ so that five fit. CONSOLE is a terminal with Alpine's login shell (`/bin/sh -l` 
 chroot, as root, `TERM=vt100`) on a pseudo-terminal, 39 columns wide. The init's own
 commands stay on the USB serial console. The page has a small terminal emulator
 (`src/terminal.rs`) that handles what a shell and line-based programs use: CR, LF,
-backspace, tab, cursor moves and erasing; colors are dropped and other characters
-than ASCII show as `?`. Full-screen programs such as `vi` or `top` will not draw
-properly. Dragging the text with a finger scrolls back through the last 3000 lines,
+backspace, tab, cursor moves and erasing. For full-screen programs it also handles
+scrolling regions, reverse index, inserting and deleting lines, reverse video (drawn
+as dark text on a light bar), saving the cursor, hiding the cursor, application
+cursor keys (the arrows then send `ESC O`) and the alternate screen, which has no
+scrollback and gives back the shell's screen on exit. Other colors and attributes are
+dropped, and other characters than ASCII show as `?`. Checked on a RAM boot by typing
+into the console's shell with `TIOCSTI` and taking screenshots: BusyBox `vi` opened a
+60-line file, jumped to line 50, scrolled back up with 40 `k`, and `:q!` left the
+shell's screen as before; `less` showed `(END)` in reverse video and scrolled back 5
+lines; `top` drew its header bar in reverse video. BusyBox's `vi`, `less` and `top`
+only move the cursor, erase lines and set reverse video, so the other sequences are
+tested only by unit tests so far. Programs made for 80 columns, such as `htop`, will
+be cramped at 39. Dragging the text with a finger scrolls back through the last 3000 lines,
 and the header says how far; typing returns to the end. The keyboard has five rows
 52 px high: CTRL (for the next key, so CTRL then `c` is Ctrl-C), ESC, TAB and the
 arrows; three rows of keys; and 123, SPACE and ENTER. HIDE KEYS shows 44 lines

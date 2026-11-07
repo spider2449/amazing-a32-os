@@ -1,11 +1,23 @@
 //! A small terminal emulator for the panel's console: it turns what a shell writes
 //! into lines of text with a cursor. It understands what line-based programs and
-//! a shell's line editing use (CR, LF, backspace, tab, cursor moves, erasing) and
-//! drops everything else, such as colors. Lines that scroll off the top stay as
-//! scrollback. Plain computation, tested on the host.
+//! a shell's line editing use (CR, LF, backspace, tab, cursor moves, erasing), and
+//! what full-screen programs such as `vi`, `less` and `top` need from a VT100:
+//! scrolling regions, inserting and deleting lines, reverse video, saving the
+//! cursor, application cursor keys and the alternate screen. Colors and other
+//! attributes are dropped. Lines that scroll off the top of the main screen stay
+//! as scrollback. Plain computation, tested on the host.
 
 /// Lines kept in all, scrollback included.
 const KEEP: usize = 3000;
+
+/// One character on the screen, and whether it is drawn in reverse video.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cell {
+    pub character: char,
+    pub reverse: bool,
+}
+
+const BLANK: Cell = Cell { character: ' ', reverse: false };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum State {
@@ -20,8 +32,23 @@ enum State {
     Charset,
 }
 
+/// A saved cursor: its row on the screen, its column and the reverse attribute.
+#[derive(Clone, Copy)]
+struct SavedCursor {
+    row: usize,
+    column: usize,
+    reverse: bool,
+}
+
+/// The main screen, kept while the alternate screen is shown.
+struct MainScreen {
+    lines: Vec<Vec<Cell>>,
+    row: usize,
+    column: usize,
+}
+
 pub struct Terminal {
-    lines: Vec<Vec<char>>,
+    lines: Vec<Vec<Cell>>,
     columns: usize,
     rows: usize,
     /// The cursor, as an index into `lines` and a column. The column can equal
@@ -32,6 +59,16 @@ pub struct Terminal {
     parameters: String,
     /// Bytes of a UTF-8 character still to skip.
     continuation: u8,
+    /// Whether new characters are drawn in reverse video.
+    reverse: bool,
+    /// The scrolling region, as the first and last screen rows. `None` is the
+    /// whole screen.
+    region: Option<(usize, usize)>,
+    saved: Option<SavedCursor>,
+    /// Set while the alternate screen is shown, which has no scrollback.
+    main: Option<MainScreen>,
+    application_cursor: bool,
+    cursor_visible: bool,
 }
 
 impl Terminal {
@@ -45,6 +82,12 @@ impl Terminal {
             state: State::Ground,
             parameters: String::new(),
             continuation: 0,
+            reverse: false,
+            region: None,
+            saved: None,
+            main: None,
+            application_cursor: false,
+            cursor_visible: true,
         }
     }
 
@@ -56,15 +99,20 @@ impl Terminal {
         self.rows
     }
 
-    /// A new size, as the keyboard shows or hides. Existing lines are kept as
-    /// they are; programs are told through the pseudo-terminal.
+    /// A new size, as the keyboard shows or hides. Lines of the main screen are
+    /// kept as they are; programs are told through the pseudo-terminal and redraw.
     pub fn resize(&mut self, columns: usize, rows: usize) {
         self.columns = columns.max(1);
         self.rows = rows.max(1);
         self.column = self.column.min(self.columns);
+        self.region = None;
+        if self.main.is_some() {
+            self.lines.resize_with(self.rows, Vec::new);
+            self.row = self.row.min(self.rows - 1);
+        }
     }
 
-    pub fn lines(&self) -> &[Vec<char>] {
+    pub fn lines(&self) -> &[Vec<Cell>] {
         &self.lines
     }
 
@@ -73,9 +121,25 @@ impl Terminal {
         (self.row, self.column.min(self.columns - 1))
     }
 
+    /// Whether the program wants the cursor shown.
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
+    /// Whether cursor keys should send `ESC O` instead of `ESC [`, as a program
+    /// asks for with `ESC [ ? 1 h`.
+    pub fn application_cursor(&self) -> bool {
+        self.application_cursor
+    }
+
     /// Adds a note of this system's own, such as that the shell ended, on a line
-    /// of its own.
+    /// of its own. Modes a full-screen program left behind are reset first.
     pub fn note(&mut self, text: &str) {
+        self.leave_alternate(false);
+        self.reverse = false;
+        self.region = None;
+        self.application_cursor = false;
+        self.cursor_visible = true;
         if self.column > 0 || !self.lines[self.row].is_empty() {
             self.new_line();
         }
@@ -104,28 +168,21 @@ impl Terminal {
         match self.state {
             State::Ground => self.ground(byte),
             State::Escape => {
-                self.state = match byte {
+                self.state = State::Ground;
+                match byte {
                     b'[' => {
                         self.parameters.clear();
-                        State::Csi
+                        self.state = State::Csi;
                     }
-                    b']' => State::Osc,
-                    b'(' | b')' | b'*' | b'+' | b'#' => State::Charset,
+                    b']' => self.state = State::Osc,
+                    b'(' | b')' | b'*' | b'+' | b'#' => self.state = State::Charset,
                     // ESC D, E, M: index, next line, reverse index.
-                    b'D' => {
-                        self.line_feed();
-                        State::Ground
-                    }
-                    b'E' => {
-                        self.column = 0;
-                        self.line_feed();
-                        State::Ground
-                    }
-                    b'M' => {
-                        self.row = self.row.max(self.screen_top() + 1) - 1;
-                        State::Ground
-                    }
-                    _ => State::Ground,
+                    b'D' => self.line_feed(),
+                    b'E' => self.new_line(),
+                    b'M' => self.reverse_index(),
+                    b'7' => self.save_cursor(),
+                    b'8' => self.restore_cursor(),
+                    _ => {}
                 }
             }
             State::Csi => {
@@ -158,7 +215,7 @@ impl Terminal {
             0x1B => self.state = State::Escape,
             b'\r' => self.column = 0,
             b'\n' | 0x0B | 0x0C => self.line_feed(),
-            0x08 => self.column = self.column.min(self.columns) .saturating_sub(1),
+            0x08 => self.column = self.column.min(self.columns).saturating_sub(1),
             b'\t' => {
                 let next = (self.column / 8 + 1) * 8;
                 self.column = next.min(self.columns - 1).max(self.column.min(self.columns - 1));
@@ -182,12 +239,13 @@ impl Terminal {
             self.column = 0;
             self.line_feed();
         }
+        let cell = Cell { character, reverse: self.reverse };
         let line = &mut self.lines[self.row];
         if line.len() <= self.column {
-            line.resize(self.column, ' ');
-            line.push(character);
+            line.resize(self.column, BLANK);
+            line.push(cell);
         } else {
-            line[self.column] = character;
+            line[self.column] = cell;
         }
         self.column += 1;
     }
@@ -198,9 +256,28 @@ impl Terminal {
     }
 
     fn line_feed(&mut self) {
+        if self.region.is_some() || self.main.is_some() {
+            let (first, last) = self.margins();
+            if self.row == last {
+                self.scroll_up(first, last, 1);
+            } else if self.row + 1 < self.lines.len() {
+                self.row += 1;
+            }
+            return;
+        }
         self.row += 1;
         if self.row == self.lines.len() {
             self.lines.push(Vec::new());
+        }
+    }
+
+    /// Up one line, scrolling the region down at its top line.
+    fn reverse_index(&mut self) {
+        let (first, last) = self.margins();
+        if self.row == first {
+            self.scroll_down(first, last, 1);
+        } else if self.row > self.screen_top() {
+            self.row -= 1;
         }
     }
 
@@ -209,9 +286,125 @@ impl Terminal {
         self.lines.len().saturating_sub(self.rows)
     }
 
+    /// Makes the screen full height, so that every screen row is a line.
+    fn fill_screen(&mut self) {
+        while self.lines.len() < self.rows {
+            self.lines.push(Vec::new());
+        }
+    }
+
+    /// The scrolling region's first and last lines, as indexes into `lines`.
+    fn margins(&mut self) -> (usize, usize) {
+        self.fill_screen();
+        let top = self.screen_top();
+        let (first, last) = self.region.unwrap_or((0, self.rows - 1));
+        (top + first, top + last)
+    }
+
+    /// Moves lines `first..=last` up by `count`, with blank lines coming in at the
+    /// bottom. On the main screen, lines leaving the top of the whole screen are
+    /// kept as scrollback, and the cursor stays on the same screen row.
+    fn scroll_up(&mut self, first: usize, last: usize, count: usize) {
+        let count = count.min(last + 1 - first);
+        if self.main.is_none() && first == self.screen_top() && last + 1 == self.lines.len() {
+            self.lines.extend(std::iter::repeat_with(Vec::new).take(count));
+            self.row += count;
+            return;
+        }
+        for _ in 0..count {
+            self.lines.remove(first);
+            self.lines.insert(last, Vec::new());
+        }
+    }
+
+    /// Moves lines `first..=last` down by `count`, with blank lines coming in at
+    /// the top.
+    fn scroll_down(&mut self, first: usize, last: usize, count: usize) {
+        for _ in 0..count.min(last + 1 - first) {
+            self.lines.remove(last);
+            self.lines.insert(first, Vec::new());
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved = Some(SavedCursor {
+            row: self.row.saturating_sub(self.screen_top()),
+            column: self.column,
+            reverse: self.reverse,
+        });
+    }
+
+    fn restore_cursor(&mut self) {
+        let saved = self.saved.unwrap_or(SavedCursor { row: 0, column: 0, reverse: false });
+        self.fill_screen();
+        self.row = self.screen_top() + saved.row.min(self.rows - 1);
+        self.column = saved.column.min(self.columns);
+        self.reverse = saved.reverse;
+    }
+
+    fn enter_alternate(&mut self, save_cursor: bool) {
+        if self.main.is_some() {
+            return;
+        }
+        if save_cursor {
+            self.save_cursor();
+        }
+        let screen_row = self.row.saturating_sub(self.screen_top()).min(self.rows - 1);
+        let lines = std::mem::replace(&mut self.lines, vec![Vec::new(); self.rows]);
+        self.main = Some(MainScreen { lines, row: self.row, column: self.column });
+        self.row = screen_row;
+    }
+
+    fn leave_alternate(&mut self, restore_cursor: bool) {
+        let Some(main) = self.main.take() else { return };
+        self.lines = main.lines;
+        self.row = main.row.min(self.lines.len() - 1);
+        self.column = main.column.min(self.columns);
+        if restore_cursor && self.saved.is_some() {
+            self.restore_cursor();
+        }
+    }
+
+    /// `ESC [ ? ... h` and `l`: modes that programs set and reset.
+    fn private_mode(&mut self, last: u8) {
+        let on = match last {
+            b'h' => true,
+            b'l' => false,
+            _ => return,
+        };
+        let modes: Vec<usize> = self.parameters[1..].split(';').filter_map(|part| part.parse().ok()).collect();
+        for mode in modes {
+            match mode {
+                1 => self.application_cursor = on,
+                25 => self.cursor_visible = on,
+                47 | 1047 | 1049 if on => self.enter_alternate(mode == 1049),
+                47 | 1047 | 1049 => self.leave_alternate(mode == 1049),
+                _ => {}
+            }
+        }
+    }
+
+    /// `ESC [ ... m`: of the attributes, only reverse video is shown. It is what
+    /// the `vt100` terminfo entry uses for standout, so status lines and
+    /// selections show.
+    fn attributes(&mut self, numbers: &[usize]) {
+        for &number in numbers {
+            match number {
+                0 => self.reverse = false,
+                7 => self.reverse = true,
+                27 => self.reverse = false,
+                _ => {}
+            }
+        }
+    }
+
     fn csi(&mut self, last: u8) {
-        // Private modes (`ESC [ ? ...`) change nothing here.
-        if self.parameters.starts_with(['?', '>', '=']) {
+        if self.parameters.starts_with('?') {
+            self.private_mode(last);
+            return;
+        }
+        // Other private sequences (`ESC [ > ...`, `ESC [ = ...`) change nothing here.
+        if self.parameters.starts_with(['>', '=']) {
             return;
         }
         let numbers: Vec<usize> = self.parameters.split(';').map(|part| part.parse().unwrap_or(0)).collect();
@@ -219,18 +412,34 @@ impl Terminal {
         let count = first.max(1);
         let column = self.column.min(self.columns - 1);
         match last {
-            b'A' => self.row = self.row.saturating_sub(count).max(self.screen_top().min(self.row)),
-            b'B' => self.row = (self.row + count).min(self.lines.len() - 1),
+            b'A' | b'F' => {
+                let (top, _) = self.margins();
+                let limit = if self.row >= top { top } else { self.screen_top() };
+                self.row = self.row.saturating_sub(count).max(limit);
+                if last == b'F' {
+                    self.column = 0;
+                }
+            }
+            b'B' | b'E' => {
+                let (_, bottom) = self.margins();
+                let limit = if self.row <= bottom { bottom } else { self.lines.len() - 1 };
+                self.row = (self.row + count).min(limit);
+                if last == b'E' {
+                    self.column = 0;
+                }
+            }
             b'C' => self.column = (column + count).min(self.columns - 1),
             b'D' => self.column = column.saturating_sub(count),
-            b'G' => self.column = (count - 1).min(self.columns - 1),
+            b'G' | b'`' => self.column = (count - 1).min(self.columns - 1),
+            b'd' => {
+                // Addressing a screen taller than the output so far adds lines.
+                self.fill_screen();
+                self.row = self.screen_top() + (count - 1).min(self.rows - 1);
+            }
             b'H' | b'f' => {
                 let row = numbers.first().copied().unwrap_or(1).max(1) - 1;
                 let column = numbers.get(1).copied().unwrap_or(1).max(1) - 1;
-                // Addressing a screen taller than the output so far adds lines.
-                while self.lines.len() < self.rows {
-                    self.lines.push(Vec::new());
-                }
+                self.fill_screen();
                 self.row = self.screen_top() + row.min(self.rows - 1);
                 self.column = column.min(self.columns - 1);
             }
@@ -238,29 +447,58 @@ impl Terminal {
                 let line = &mut self.lines[self.row];
                 match first {
                     0 => line.truncate(column),
-                    1 => line.iter_mut().take(column + 1).for_each(|cell| *cell = ' '),
+                    1 => line.iter_mut().take(column + 1).for_each(|cell| *cell = BLANK),
                     _ => line.clear(),
                 }
             }
-            b'J' => match first {
-                0 => {
-                    self.lines[self.row].truncate(column);
-                    self.lines.truncate(self.row + 1);
-                }
-                1 => {
-                    for row in self.screen_top()..self.row {
-                        self.lines[row].clear();
+            b'J' => {
+                let home = self.row == self.screen_top() && column == 0;
+                match first {
+                    // From the top left of the main screen, as `clear` does, this
+                    // clears the whole screen, which keeps it as scrollback.
+                    0 if !(home && self.main.is_none()) => {
+                        self.lines[self.row].truncate(column);
+                        for line in &mut self.lines[self.row + 1..] {
+                            line.clear();
+                        }
                     }
-                    self.lines[self.row].iter_mut().take(column + 1).for_each(|cell| *cell = ' ');
+                    1 => {
+                        for row in self.screen_top()..self.row {
+                            self.lines[row].clear();
+                        }
+                        self.lines[self.row].iter_mut().take(column + 1).for_each(|cell| *cell = BLANK);
+                    }
+                    _ if self.main.is_some() => {
+                        self.lines.iter_mut().for_each(Vec::clear);
+                    }
+                    // Clearing the screen keeps what was on it as scrollback.
+                    _ => {
+                        let keep = self.lines.len();
+                        let screen_row = self.row - self.screen_top().min(self.row);
+                        self.lines.extend(std::iter::repeat_with(Vec::new).take(self.rows));
+                        self.row = (keep + screen_row.min(self.rows - 1)).min(self.lines.len() - 1);
+                    }
                 }
-                // Clearing the screen keeps what was on it as scrollback.
-                _ => {
-                    let keep = self.lines.len();
-                    self.lines.extend(std::iter::repeat_with(Vec::new).take(self.rows));
-                    self.row = keep + (self.row - self.screen_top().min(self.row)).min(self.rows - 1);
-                    self.row = self.row.min(self.lines.len() - 1);
+            }
+            b'L' | b'M' => {
+                let (top, bottom) = self.margins();
+                if (top..=bottom).contains(&self.row) {
+                    if last == b'L' {
+                        self.scroll_down(self.row, bottom, count);
+                    } else {
+                        self.scroll_up(self.row, bottom, count);
+                    }
+                    self.column = 0;
                 }
-            },
+            }
+            b'S' => {
+                let (top, bottom) = self.margins();
+                self.scroll_up(top, bottom, count);
+            }
+            b'T' => {
+                let (top, bottom) = self.margins();
+                self.scroll_down(top, bottom, count);
+            }
             b'P' => {
                 let line = &mut self.lines[self.row];
                 if column < line.len() {
@@ -272,7 +510,7 @@ impl Terminal {
                 let line = &mut self.lines[self.row];
                 if column < line.len() {
                     for _ in 0..count {
-                        line.insert(column, ' ');
+                        line.insert(column, BLANK);
                     }
                     line.truncate(self.columns);
                 }
@@ -280,10 +518,23 @@ impl Terminal {
             b'X' => {
                 let line = &mut self.lines[self.row];
                 for cell in line.iter_mut().skip(column).take(count) {
-                    *cell = ' ';
+                    *cell = BLANK;
                 }
             }
-            // Colors and other attributes, and everything else, are dropped.
+            b'r' => {
+                let top = first.max(1) - 1;
+                let bottom = numbers.get(1).copied().filter(|&row| row > 0).unwrap_or(self.rows).min(self.rows) - 1;
+                if top < bottom {
+                    self.region = if top == 0 && bottom == self.rows - 1 { None } else { Some((top, bottom)) };
+                    self.fill_screen();
+                    self.row = self.screen_top();
+                    self.column = 0;
+                }
+            }
+            b's' => self.save_cursor(),
+            b'u' => self.restore_cursor(),
+            b'm' => self.attributes(&numbers),
+            // Everything else is dropped.
             _ => {}
         }
     }
@@ -310,7 +561,13 @@ mod tests {
     use super::*;
 
     fn text(terminal: &Terminal) -> Vec<String> {
-        terminal.lines().iter().map(|line| line.iter().collect()).collect()
+        terminal.lines().iter().map(|line| line.iter().map(|cell| cell.character).collect()).collect()
+    }
+
+    /// The screen's lines, the last `rows` of all lines.
+    fn screen(terminal: &Terminal) -> Vec<String> {
+        let lines = text(terminal);
+        lines[lines.len().saturating_sub(terminal.rows())..].to_vec()
     }
 
     #[test]
@@ -352,6 +609,10 @@ mod tests {
         let mut terminal = Terminal::new(20, 5);
         terminal.feed(b"\x1b[1;34mdir\x1b[0m file\x1b]0;title\x07!\x1b(B\x1b[?25l");
         assert_eq!(text(&terminal), ["dir file!"]);
+        assert!(terminal.lines()[0].iter().all(|cell| !cell.reverse));
+        assert!(!terminal.cursor_visible());
+        terminal.feed(b"\x1b[?25h");
+        assert!(terminal.cursor_visible());
     }
 
     #[test]
@@ -374,12 +635,33 @@ mod tests {
     }
 
     #[test]
+    fn clear_from_home_keeps_scrollback() {
+        // Busybox `clear` sends ESC [ H ESC [ J.
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"a\r\nb\r\nc\r\nd\r\n$ ");
+        terminal.feed(b"\x1b[H\x1b[J$ ");
+        assert_eq!(screen(&terminal), ["$ ", "", ""]);
+        assert_eq!(&text(&terminal)[..5], ["a", "b", "c", "d", "$ "]);
+    }
+
+    #[test]
+    fn erasing_below_keeps_the_screen_in_place() {
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"a\r\nb\r\nc\r\nd\r\ne");
+        terminal.feed(b"\x1b[2;2H\x1b[J");
+        assert_eq!(text(&terminal), ["a", "b", "c", "d", ""]);
+        assert_eq!(terminal.cursor(), (3, 1));
+    }
+
+    #[test]
     fn moves_to_screen_positions() {
         let mut terminal = Terminal::new(10, 3);
         terminal.feed(b"a\r\nb\r\nc\r\nd");
         terminal.feed(b"\x1b[1;3HX");
         // The screen is the last three lines: b, c, d.
         assert_eq!(text(&terminal), ["a", "b X", "c", "d"]);
+        terminal.feed(b"\x1b[3dY");
+        assert_eq!(screen(&terminal), ["b X", "c", "d  Y"]);
     }
 
     #[test]
@@ -397,6 +679,120 @@ mod tests {
         terminal.feed(b"# ");
         terminal.note("[ended]");
         assert_eq!(text(&terminal), ["# ", "[ended]", ""]);
+    }
+
+    #[test]
+    fn scrolls_inside_a_region() {
+        let mut terminal = Terminal::new(10, 4);
+        terminal.feed(b"\x1b[H1\r\n2\r\n3\r\n4");
+        // Region rows 2 and 3; a line feed at its bottom scrolls only those rows.
+        terminal.feed(b"\x1b[2;3r\x1b[3;1H\nX");
+        assert_eq!(screen(&terminal), ["1", "3", "X", "4"]);
+        // A reverse index at the region's top scrolls it down.
+        terminal.feed(b"\x1b[2;1H\x1bMY");
+        assert_eq!(screen(&terminal), ["1", "Y", "3", "4"]);
+        // Nothing went to scrollback.
+        assert_eq!(terminal.lines().len(), 4);
+        // CSI S and T scroll the region too.
+        terminal.feed(b"\x1b[S");
+        assert_eq!(screen(&terminal), ["1", "3", "", "4"]);
+        terminal.feed(b"\x1b[T");
+        assert_eq!(screen(&terminal), ["1", "", "3", "4"]);
+    }
+
+    #[test]
+    fn whole_screen_region_keeps_scrollback() {
+        let mut terminal = Terminal::new(10, 2);
+        terminal.feed(b"\x1b[1;2r\x1b[2;1Ha\r\nb\r\nc");
+        assert_eq!(text(&terminal), ["", "a", "b", "c"]);
+        // Scrolling the whole main screen keeps lines as scrollback, and the
+        // cursor stays on its screen row.
+        terminal.feed(b"\x1b[S");
+        assert_eq!(text(&terminal), ["", "a", "b", "c", ""]);
+        assert_eq!(terminal.cursor(), (4, 1));
+    }
+
+    #[test]
+    fn cursor_moves_stop_at_the_region() {
+        let mut terminal = Terminal::new(10, 5);
+        terminal.feed(b"\x1b[2;4r\x1b[3;1H\x1b[9A");
+        assert_eq!(terminal.cursor().0, 1);
+        terminal.feed(b"\x1b[9B");
+        assert_eq!(terminal.cursor().0, 3);
+    }
+
+    #[test]
+    fn inserts_and_deletes_lines() {
+        let mut terminal = Terminal::new(10, 4);
+        terminal.feed(b"\x1b[H1\r\n2\r\n3\r\n4");
+        terminal.feed(b"\x1b[2;1H\x1b[L");
+        assert_eq!(screen(&terminal), ["1", "", "2", "3"]);
+        terminal.feed(b"\x1b[2M");
+        assert_eq!(screen(&terminal), ["1", "3", "", ""]);
+        // Inside a region, lines below it stay.
+        let mut terminal = Terminal::new(10, 4);
+        terminal.feed(b"\x1b[H1\r\n2\r\n3\r\n4\x1b[1;3r\x1b[1;1H\x1b[L");
+        assert_eq!(screen(&terminal), ["", "1", "2", "4"]);
+    }
+
+    #[test]
+    fn shows_reverse_video() {
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"a\x1b[7mbc\x1b[27md\x1b[7me\x1b[mf");
+        let reverse: Vec<bool> = terminal.lines()[0].iter().map(|cell| cell.reverse).collect();
+        assert_eq!(reverse, [false, true, true, false, true, false]);
+    }
+
+    #[test]
+    fn saves_and_restores_the_cursor() {
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"\x1b[2;3H\x1b7\x1b[H\x1b8X");
+        assert_eq!(screen(&terminal), ["", "  X", ""]);
+        terminal.feed(b"\x1b[1;5H\x1b[s\x1b[3;1H\x1b[uY");
+        assert_eq!(screen(&terminal), ["    Y", "  X", ""]);
+    }
+
+    #[test]
+    fn alternate_screen_restores_the_main_one() {
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"one\r\ntwo\r\n$ vi");
+        terminal.feed(b"\x1b[?1049h\x1b[H\x1b[2Jfile\r\n~\r\n~\r\n~");
+        // No scrollback on the alternate screen, and nothing of the main one.
+        assert_eq!(text(&terminal), ["~", "~", "~"]);
+        terminal.feed(b"\x1b[?1049l");
+        assert_eq!(text(&terminal), ["one", "two", "$ vi"]);
+        assert_eq!(terminal.cursor(), (2, 4));
+    }
+
+    #[test]
+    fn a_note_leaves_the_alternate_screen() {
+        let mut terminal = Terminal::new(20, 3);
+        terminal.feed(b"$ \x1b[?1049h\x1b[?1h\x1b[7mx");
+        terminal.note("[ended]");
+        assert!(!terminal.application_cursor());
+        assert_eq!(text(&terminal), ["$ ", "[ended]", ""]);
+        assert!(terminal.lines()[1].iter().all(|cell| !cell.reverse));
+    }
+
+    #[test]
+    fn resizing_the_alternate_screen() {
+        let mut terminal = Terminal::new(10, 3);
+        terminal.feed(b"\x1b[?1049h\x1b[3;1Hx");
+        terminal.resize(10, 5);
+        assert_eq!(terminal.lines().len(), 5);
+        terminal.resize(10, 2);
+        assert_eq!(terminal.lines().len(), 2);
+        assert_eq!(terminal.cursor().0, 1);
+    }
+
+    #[test]
+    fn application_cursor_mode() {
+        let mut terminal = Terminal::new(10, 3);
+        assert!(!terminal.application_cursor());
+        terminal.feed(b"\x1b[?1h\x1b=");
+        assert!(terminal.application_cursor());
+        terminal.feed(b"\x1b[?1l\x1b>");
+        assert!(!terminal.application_cursor());
     }
 
     #[test]

@@ -555,7 +555,10 @@ impl Ui {
             Press::Escape => return self.send(vec![0x1B]),
             Press::Tab => return self.send(vec![b'\t']),
             Press::Enter => return self.send(vec![b'\r']),
-            Press::Arrow(letter) => return self.send(vec![0x1B, b'[', letter]),
+            Press::Arrow(letter) => {
+                let introducer = if self.terminal.application_cursor() { b'O' } else { b'[' };
+                return self.send(vec![0x1B, introducer, letter]);
+            }
             Press::Key(character) if self.page == Page::Console => {
                 let bytes = key_bytes(character, self.control);
                 return self.send(bytes);
@@ -975,14 +978,28 @@ impl Ui {
         let lines = self.terminal.lines();
         let end = lines.len().saturating_sub(self.console_scroll);
         let start = end.saturating_sub(rows);
+        let cell_width = CHAR_WIDTH * TEXT_SMALL;
         for (index, line) in lines[start..end].iter().enumerate() {
-            let text: String = line.iter().collect();
             let y = TERMINAL_TOP + index as u32 * TERMINAL_LINE;
-            canvas.draw_text(TERMINAL_LEFT, y, TEXT_SMALL, &text, FOREGROUND);
+            // Runs of normal and reverse cells, the reverse ones light on a bar.
+            let mut offset = 0;
+            for run in line.chunk_by(|a, b| a.reverse == b.reverse) {
+                let x = TERMINAL_LEFT + offset * cell_width;
+                offset += run.len() as u32;
+                let text: String = run.iter().map(|cell| cell.character).collect();
+                let color = if run[0].reverse {
+                    let width = run.len() as u32 * cell_width;
+                    canvas.fill(Rect { x, y: y - 2, width, height: TERMINAL_LINE }, FOREGROUND);
+                    PANEL
+                } else {
+                    FOREGROUND
+                };
+                canvas.draw_text(x, y, TEXT_SMALL, &text, color);
+            }
         }
         // The cursor, as a bar under its character, while it is in view.
         let (row, column) = self.terminal.cursor();
-        if (start..end).contains(&row) {
+        if self.terminal.cursor_visible() && (start..end).contains(&row) {
             let x = TERMINAL_LEFT + column as u32 * CHAR_WIDTH * TEXT_SMALL;
             let y = TERMINAL_TOP + (row - start) as u32 * TERMINAL_LINE + CHAR_HEIGHT * TEXT_SMALL + 1;
             canvas.fill(Rect { x, y, width: (CHAR_WIDTH - 1) * TEXT_SMALL, height: 2 }, ACCENT);
