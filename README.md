@@ -930,6 +930,22 @@ Requirements found on the way, which other devices may share:
 - Setting the address with `ip link set wlan0 address` after power on did not change
   it. Whether this failed or the driver replaced it was not determined.
 
+### Moving between access points
+
+After each lease the init sends a gratuitous ARP for its address three times over 4 s,
+and logs `arp: announced`. Before it leaves a network for another, it sends
+`disconnect` and waits a second before scanning, so that the old access point can be
+told; this logs `wifi: left the network`.
+
+Neither change fixed what they were added for. On a LAN with a TP-Link access point
+(SSID `tsai`) and a CHT mesh access point, both on one router, moving from CHT to the
+TP-Link cut the phone off for about 7 s. Moving from the TP-Link to CHT left it
+unreachable from the PC and a Raspberry Pi for 3 min 55 s with neither change, and
+4 min 23 s with both, in RAM boots. During that time the router and the CHT access
+point reached it, the TP-Link and hosts behind it did not, and ARP to those hosts
+still resolved. It ended by itself. The cause was not found. After restarting the CHT
+access point, the phone rejoined in 55 s with the same address.
+
 The `sh LINE` console command runs a line with the stock shell.
 
 ## Bluetooth

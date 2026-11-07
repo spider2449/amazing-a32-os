@@ -82,7 +82,37 @@ extern "C" {
     fn klogctl(kind: c_int, buffer: *mut c_char, length: c_int) -> c_int;
     fn sync();
     fn syscall(number: c_long, ...) -> c_long;
+    fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+    fn sendto(
+        socket: c_int,
+        buffer: *const c_void,
+        length: usize,
+        flags: c_int,
+        address: *const c_void,
+        address_length: c_uint,
+    ) -> isize;
+    fn close(fd: c_int) -> c_int;
+    fn if_nametoindex(name: *const c_char) -> c_uint;
 }
+
+/// `struct sockaddr_ll` from `<linux/if_packet.h>`, for sending raw frames.
+#[repr(C)]
+struct SockaddrLl {
+    family: u16,
+    protocol: u16,
+    interface_index: c_int,
+    hardware_type: u16,
+    packet_type: u8,
+    address_length: u8,
+    address: [u8; 8],
+}
+
+const AF_PACKET: c_int = 17;
+const SOCK_RAW: c_int = 3;
+const ARP_HARDWARE_ETHER: u16 = 1;
+// Sent a few times, because one broadcast frame over Wi-Fi can be lost.
+const ARP_ANNOUNCE_GAPS: [Duration; 3] =
+    [Duration::ZERO, Duration::from_secs(1), Duration::from_secs(3)];
 
 const WNOHANG: c_int = 1;
 const S_IFCHR: c_uint = 0o020000;
@@ -149,6 +179,9 @@ const WPA_PING_WAIT: Duration = Duration::from_secs(10);
 // Time for a scan to finish before a network is selected.
 const WIFI_SCAN_DELAY: Duration = Duration::from_secs(6);
 const WIFI_JOIN_WAIT: Duration = Duration::from_secs(30);
+const WIFI_LEAVE_WAIT: Duration = Duration::from_secs(3);
+// Time for the deauthentication frame and its retries before the radio scans.
+const WIFI_DEAUTH_SETTLE: Duration = Duration::from_secs(1);
 const WPA_COMPLETED: &str = "COMPLETED";
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DATA_DEVICE: &str = "/dev/userdata";
@@ -2215,10 +2248,88 @@ fn renew_lease(interface: &str) -> io::Result<String> {
     }
     let renew_seconds = wifi::renew_after(lease.lease_seconds);
     state.renew_at = Some(Instant::now() + Duration::from_secs(renew_seconds));
+    drop(state);
+    announce_address(interface, lease.address);
     Ok(format!(
         "address {}/{prefix} router {:?} dns {:?} lease {:?} s, renewing in {renew_seconds} s",
         lease.address, lease.router, lease.dns, lease.lease_seconds
     ))
+}
+
+/// Sends gratuitous ARP for the address from a short-lived thread, so that a lease
+/// renewal does not wait for it. After a move to another access point, hosts on the
+/// LAN could not reach the phone for minutes, while the router could.
+fn announce_address(interface: &str, address: Ipv4Addr) {
+    let interface = interface.to_string();
+    let spawned = thread::Builder::new().name("arp-announce".into()).spawn(move || {
+        let mut sent = 0;
+        let mut last_error = None;
+        for gap in ARP_ANNOUNCE_GAPS {
+            thread::sleep(gap);
+            match send_gratuitous_arp(&interface, address) {
+                Ok(()) => sent += 1,
+                Err(err) => last_error = Some(err),
+            }
+        }
+        match last_error {
+            None => log(&format!("arp: announced {address} on {interface} {sent} times")),
+            Some(err) => log(&format!("arp: {sent} of {} announcements sent: {err}", ARP_ANNOUNCE_GAPS.len())),
+        }
+    });
+    if let Err(err) = spawned {
+        log(&format!("arp: could not start the announcement: {err}"));
+    }
+}
+
+fn send_gratuitous_arp(interface: &str, address: Ipv4Addr) -> io::Result<()> {
+    let mac_text = fs::read_to_string(format!("/sys/class/net/{interface}/address"))?;
+    let mac = dhcp::parse_mac(&mac_text)
+        .ok_or_else(|| io::Error::other(format!("bad MAC address: {mac_text}")))?;
+    let name = cstring(interface)?;
+    // SAFETY: `name` is a valid NUL-terminated string for the call duration.
+    let index = unsafe { if_nametoindex(name.as_ptr()) };
+    if index == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let frame = wifi::gratuitous_arp(mac, address.octets());
+    let mut target = SockaddrLl {
+        family: AF_PACKET as u16,
+        protocol: wifi::ETHERTYPE_ARP.to_be(),
+        interface_index: index as c_int,
+        hardware_type: ARP_HARDWARE_ETHER,
+        packet_type: 0,
+        address_length: 6,
+        address: [0; 8],
+    };
+    target.address[..6].copy_from_slice(&frame[0..6]);
+
+    // Protocol 0: this socket only sends, so it should receive nothing.
+    // SAFETY: plain constants; the result is checked below.
+    let fd = unsafe { socket(AF_PACKET, SOCK_RAW, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `frame` and `target` outlive the call, and the lengths match them.
+    let written = unsafe {
+        sendto(
+            fd,
+            frame.as_ptr().cast(),
+            frame.len(),
+            0,
+            (&target as *const SockaddrLl).cast(),
+            std::mem::size_of::<SockaddrLl>() as c_uint,
+        )
+    };
+    let result = if written == frame.len() as isize {
+        Ok(())
+    } else if written < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Err(io::Error::other(format!("only {written} bytes sent")))
+    };
+    // SAFETY: `fd` is a socket this function opened and nothing else uses.
+    unsafe { close(fd) };
+    result
 }
 
 /// Sets the clock from the first time server that answers, then saves it in the
@@ -2491,8 +2602,28 @@ fn wpa_command(arguments: &[&str]) -> io::Result<()> {
     }
 }
 
+/// Leaves the current network, giving the deauthentication time to go out first.
+///
+/// `remove_network` straight before `scan` moved the radio off the channel while
+/// the frame may still have been queued. The old access point then kept the phone
+/// as its client: on 2026-11-07, after a move from a TP-Link to another access point
+/// on the same LAN, hosts behind the TP-Link could not reach the phone for minutes,
+/// while the router could. A gratuitous ARP did not change that.
+fn leave_network() -> io::Result<()> {
+    let connected = || wifi::wpa_state(&wpa_cli(&["status"]).unwrap_or_default()) == Some(WPA_COMPLETED);
+    if connected() {
+        wpa_command(&["disconnect"])?;
+        if !wait_until(WIFI_LEAVE_WAIT, || !connected()) {
+            log("wifi: still connected after disconnect");
+        }
+        thread::sleep(WIFI_DEAUTH_SETTLE);
+        log("wifi: left the network");
+    }
+    wpa_command(&["remove_network", "all"])
+}
+
 fn join_network(credentials: &wifi::Credentials) -> io::Result<()> {
-    wpa_command(&["remove_network", "all"])?;
+    leave_network()?;
     wpa_command(&["scan"])?;
     thread::sleep(WIFI_SCAN_DELAY);
 
@@ -2751,7 +2882,7 @@ impl Platform for KernelPlatform {
         if DATA_READY.load(Ordering::Acquire) {
             File::open(SETTINGS_DIR)?.sync_all()?;
         }
-        wpa_command(&["remove_network", "all"])?;
+        leave_network()?;
         let mut state = lease_state();
         state.renew_at = None;
         state.applied = None;

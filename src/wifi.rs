@@ -210,6 +210,32 @@ pub fn renew_after(lease_seconds: Option<u32>) -> u64 {
     (lease_seconds.map_or(DEFAULT_LEASE, u64::from) / 2).max(SHORTEST_WAIT)
 }
 
+/// Length of an Ethernet frame that carries an ARP packet for IPv4.
+pub const ARP_FRAME_LEN: usize = 42;
+/// The Ethernet type of ARP.
+pub const ETHERTYPE_ARP: u16 = 0x0806;
+
+/// Builds a gratuitous ARP request, broadcast, that says `address` is at `mac`.
+///
+/// After the phone moves to another access point, switches and the old access point
+/// can keep sending its frames the old way for minutes. This announcement goes out
+/// from the new place and tells them, and every host's ARP cache, where it is now.
+/// The request form, with sender and target both set to the address, is the one
+/// RFC 5227 uses for announcements.
+pub fn gratuitous_arp(mac: [u8; 6], address: [u8; 4]) -> [u8; ARP_FRAME_LEN] {
+    let mut frame = [0u8; ARP_FRAME_LEN];
+    frame[0..6].copy_from_slice(&[0xff; 6]);
+    frame[6..12].copy_from_slice(&mac);
+    frame[12..14].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    // Hardware Ethernet, protocol IPv4, address lengths 6 and 4, operation request.
+    frame[14..22].copy_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]);
+    frame[22..28].copy_from_slice(&mac);
+    frame[28..32].copy_from_slice(&address);
+    // The target hardware address stays zero, as it is unknown in a request.
+    frame[38..42].copy_from_slice(&address);
+    frame
+}
+
 /// Finds `wpa_state` in the output of `wpa_cli status`.
 pub fn wpa_state(status: &str) -> Option<&str> {
     status.lines().find_map(|line| line.strip_prefix("wpa_state="))
@@ -346,6 +372,19 @@ mod tests {
         assert_eq!(renew_after(Some(259_200)), 129_600);
         assert_eq!(renew_after(Some(10)), 60);
         assert_eq!(renew_after(None), 1800);
+    }
+
+    #[test]
+    fn builds_a_gratuitous_arp_request() {
+        let mac = [0x00, 0x08, 0x22, 0x61, 0x75, 0xbe];
+        let frame = gratuitous_arp(mac, [192, 168, 1, 104]);
+        let expected: [u8; ARP_FRAME_LEN] = [
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x08, 0x22, 0x61, 0x75, 0xbe, 0x08, 0x06,
+            0x00, 0x01, 0x08, 0x00, 6, 4, 0x00, 0x01,
+            0x00, 0x08, 0x22, 0x61, 0x75, 0xbe, 192, 168, 1, 104,
+            0, 0, 0, 0, 0, 0, 192, 168, 1, 104,
+        ];
+        assert_eq!(frame, expected);
     }
 
     #[test]
