@@ -538,7 +538,8 @@ logged, since the rest can be a password. Turning the screen off clears the comm
 and output, and output that arrives while it is off is dropped. Anyone holding the
 phone can therefore run commands as root, as the USB serial console already allows.
 Checked on a RAM boot with `ui tap` and screenshots: `info` and `help`, the hidden
-keyboard and scrolling.
+keyboard and scrolling. After flashing, the page answered a mistyped command with the
+console's "unknown command" line.
 
 The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
 enterprise networks are not listed, because this system cannot join them. Text is ASCII, so
