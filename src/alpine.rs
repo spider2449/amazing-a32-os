@@ -152,12 +152,26 @@ const fn ptr_none() -> *const c_char {
     std::ptr::null()
 }
 
+/// The `TZ` value for programs in the chroot. Alpine has no zone files here, so
+/// without it every clock there shows UTC.
+static TIME_ZONE: Mutex<String> = Mutex::new(String::new());
+
+/// Sets the time zone for programs started in the chroot from now on. sshd hands
+/// its own `TZ` to SSH sessions, so those follow only after it restarts.
+pub fn set_time_zone(tz: String) {
+    *TIME_ZONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = tz;
+}
+
 /// A program that runs inside the chroot, with Alpine's environment.
 fn chroot_command(program: &str) -> io::Result<Command> {
     let root: CString = cstring(ROOT)?;
     let top: CString = cstring("/")?;
     let mut command = Command::new(program);
     command.env_clear().env("PATH", PATH).env("HOME", "/root").stdin(Stdio::null());
+    let tz = TIME_ZONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    if !tz.is_empty() {
+        command.env("TZ", tz);
+    }
     // SAFETY: the closure only makes two system calls, which are async-signal-safe,
     // and it uses strings that were allocated before the fork.
     unsafe {

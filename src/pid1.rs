@@ -1849,9 +1849,11 @@ fn settings() -> Settings {
     *SETTINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Puts settings in use at once: the backlight changes if the screen is on, and
+/// Puts settings in use at once: the backlight changes if the screen is on, the
+/// time zone holds for programs started in Alpine from now on, and
 /// the rest is read where it is needed.
 fn apply_settings(chosen: Settings) {
+    alpine::set_time_zone(chosen.tz());
     let before = std::mem::replace(&mut *SETTINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), chosen);
     if before.backlight() != chosen.backlight() && SCREEN_ON.load(Ordering::Acquire) {
         if let Err(err) = fs::write(BACKLIGHT, chosen.backlight()) {

@@ -44,11 +44,11 @@ const SENSOR_ROW_HEIGHT: u32 = 58;
 const REMOVE_ACTION: Rect = Rect { x: 60, y: 600, width: 360, height: 88 };
 // On the system page, below the settings page's rows, so that a double tap on it
 // cannot change a setting, and away from the confirm buttons.
-const OPEN_SETTINGS: Rect = Rect { x: 60, y: 640, width: 360, height: 88 };
+const OPEN_SETTINGS: Rect = Rect { x: 60, y: 690, width: 360, height: 72 };
 // The settings page: one row for each setting, its name and value on the left and
 // two buttons on the right.
-const SETTING_ROW_TOP: u32 = 110;
-const SETTING_ROW_STEP: u32 = 140;
+const SETTING_ROW_TOP: u32 = 100;
+const SETTING_ROW_STEP: u32 = 120;
 const SETTING_BUTTONS: Rect = Rect { x: 240, y: 24, width: WIDTH - MARGIN - 240, height: 72 };
 /// Where the camera page shows its photo: a 3:4 portrait photo fills it.
 const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
@@ -1088,10 +1088,10 @@ impl Ui {
         } else if !self.settings.touch_wakes() {
             &["Only the power key turns the", "screen on."]
         } else {
-            &["Changes apply at once and are", "kept on /data."]
+            &["Changes apply at once. The time zone", "is for programs started after it."]
         };
         for (index, line) in notes.iter().enumerate() {
-            canvas.draw_text(MARGIN, SETTING_ROW_TOP + 4 * SETTING_ROW_STEP + index as u32 * 26, TEXT_SMALL, line, MUTED);
+            canvas.draw_text(MARGIN, SETTING_ROW_TOP + Setting::ALL.len() as u32 * SETTING_ROW_STEP + index as u32 * 26, TEXT_SMALL, line, MUTED);
         }
     }
 
@@ -1852,7 +1852,7 @@ mod tests {
         let mut ui = Ui::default();
         ui.page = Page::Settings;
         let rows: Vec<Rect> = ui.buttons().iter().filter(|button| matches!(button.press, Press::Change(..))).map(|button| button.area).collect();
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 2 * Setting::ALL.len());
         assert!(rows.iter().all(|area| !area.overlaps(OPEN_SETTINGS)));
     }
 

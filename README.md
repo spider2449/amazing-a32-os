@@ -622,10 +622,18 @@ unknown line or a value that is not offered leaves that setting at its default. 
 | Brightness | 6%, 13%, 25%, 50%, 75%, 100% | 25% | `brightness=64` (out of 255) |
 | Touch wakes the screen | on, off. Off leaves only the power key | on | `touch-wakes=on` |
 | Desktop right click hold | 0.8, 1, 1.5, 2, 2.5 s | 1.5 s | `right-click-hold=1500` (ms) |
+| Time zone | UTC-12 to UTC+14, in whole hours | UTC | `time-zone=+8` (hours) |
 
 The defaults are the values used before the page existed. With `never` the panel is
 drawn every second, which raised idle CPU use from about 1.4% to 12% when measured (see
 Tuning), so the page says so. The hold time takes effect when the desktop next starts.
+
+Alpine has no zone files (`/usr/share/zoneinfo` and `/etc/localtime` are missing), so every
+clock there showed UTC. The init gives each program it starts in the chroot `TZ` as a
+POSIX value, `<+08>-8` for UTC+8, which needs no files: the desktop, the console's shell,
+`alpine` commands and sshd. A change holds for programs started after it, so the desktop
+and shell take it when they next start, and SSH sessions after the phone restarts, since
+OpenSSH hands its own `TZ` to them. Logs and the status page stay in UTC.
 
 Checked on RAM boots with `ui tap`, screenshots and the log: each change applied and was
 saved at once, and a step past the end of a range saved nothing. At 15 s the backlight
@@ -634,6 +642,13 @@ tap left it at 0. After a restart the init read the file 0.01 s after `/data` mo
 and set the backlight to 128, and a file changed by hand to 5 min with touch waking on
 showed on the page as it was. Then flashed: the phone booted from it, joined the network at
 28.8 s, and a change on the page was saved; the file was left at the defaults.
+
+The time zone, checked on RAM boots: set to UTC+8 on the page, `alpine date` read
+`19:47:12 +08` at 11:47 UTC, and after a restart the init read `time-zone=+8` from the
+file. On the desktop the tray clock showed `07:51 PM` and its date `19:51:34`; a tap on it
+opened nothing; an xclock started by hand showed local time with a title bar, and its
+close button ended it. SSH was not checked, because the key on the test computer was
+refused.
 
 ## Desktop
 
@@ -705,6 +720,12 @@ The init starts JWM with a copy of Alpine's settings, `/run/a32-jwmrc`, changed 
 - JWM put the keyboard at the top of the screen with a title, whatever position it asked
   for, even as a dock. A group for it sets its place, no title or border, above other
   windows, and no focus.
+- The tray's clock was blank. Alpine's format, `%l:%M %p`, uses `%l`, a GNU extension
+  that musl's `strftime` does not have: `date '+[%l:%M %p]'` printed only `[`. The init
+  writes `%I` instead, which shows `07:51 PM`. A tap on the blank clock still ran its
+  button, `exec:xclock`, and Alpine's group for xclock gives it no title, so the window
+  that opened had no close button. The clock's button is removed, so a tap only shows the
+  date, and Alpine's groups keep their titles. Only the keyboard has none.
 
 JWM's tray buttons that start a program, such as KB, did nothing when the press and the
 release came together, which is what a tap makes when the finger lifts; `xdotool click`

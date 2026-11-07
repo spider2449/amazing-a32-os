@@ -38,6 +38,11 @@ pub fn keyboard_script(width: u32, height: u32) -> String {
 ///   keyboard took the focus away from the window being typed in.
 /// - The keyboard stays above the tray, without a title, above other windows, and
 ///   never takes the focus. A KB button in the tray shows or hides it.
+/// - The tray's clock shows the time, and a tap on it opens nothing. It was blank
+///   (see `with_musl_clock_format`), and a tap on it opened an xclock window that
+///   could not be closed.
+/// - Every window of Alpine's groups keeps its title, with its close button.
+///   Alpine's xclock group had none, for that window above.
 pub fn for_touch(text: &str, height: u32) -> Option<String> {
     const MENU: &str = "<RootMenu onroot=\"";
     let start = text.find(MENU)? + MENU.len();
@@ -66,6 +71,15 @@ pub fn for_touch(text: &str, height: u32) -> Option<String> {
         changed.insert_str(at, &format!("<TrayButton label=\"KB\">exec:/bin/sh {KEYBOARD_SCRIPT}</TrayButton>"));
     }
 
+    changed = with_musl_clock_format(&changed);
+    let mut at = 0;
+    while let Some((_, content_start, content_end, _)) = find_element(&changed, "Clock", at) {
+        changed.replace_range(content_start..content_end, "");
+        at = content_start;
+    }
+    // Before the keyboard's group is added, which has no title on purpose.
+    changed = remove_elements(&changed, "Option", |_, content| content.trim() != "notitle");
+
     let options = [
         "notitle".to_string(),
         "noborder".to_string(),
@@ -81,6 +95,22 @@ pub fn for_touch(text: &str, height: u32) -> Option<String> {
     let close = changed.rfind("</JWM>")?;
     changed.replace_range(close..close + "</JWM>".len(), &group);
     Some(changed)
+}
+
+/// Clock formats with the hour as musl's `strftime` writes it. Alpine's `%l` is a
+/// GNU extension that musl does not have, so the clock showed nothing: `date`
+/// stopped writing where it came. `%k` is the same in 24 hours.
+fn with_musl_clock_format(text: &str) -> String {
+    let mut text = text.to_string();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("<Clock") {
+        let start = at + found;
+        let end = text[start..].find('>').map_or(text.len(), |length| start + length);
+        let tag = text[start..end].replace("%l", "%I").replace("%k", "%H");
+        text.replace_range(start..end, &tag);
+        at = start + tag.len();
+    }
+    text
 }
 
 /// Light programs that Alpine's menu does not list, as `(icon, label, command)`.
@@ -399,5 +429,28 @@ mod tests {
     fn unknown_settings_are_left_alone() {
         assert_eq!(for_touch("<JWM></JWM>", 854), None);
         assert_eq!(for_touch(r#"<RootMenu onroot="1">"#, 854), None);
+    }
+
+    #[test]
+    fn the_clock_shows_and_opens_nothing_and_windows_keep_titles() {
+        // As in Alpine's settings, shortened.
+        let tray = ALPINE
+            .replace(
+                "    </Tray>\n",
+                "        <TaskList maxwidth=\"256\"/>\n        <Swallow width=\"32\" height=\"32\" name=\"xclock\">xclock</Swallow>\n        <Clock format=\"%l:%M %p\"><Button mask=\"123\">exec:xclock</Button></Clock>\n    </Tray>\n",
+            )
+            .replace(
+                "    <FocusModel>",
+                "    <Group>\n        <Name>xclock</Name>\n        <Option>drag</Option>\n        <Option>notitle</Option>\n    </Group>\n    <FocusModel>",
+            );
+        let changed = for_touch(&tray, 854).unwrap();
+        assert!(changed.contains(r#"<Clock format="%I:%M %p"></Clock>"#), "{changed}");
+        assert!(!changed.contains("exec:xclock"));
+        assert!(changed.contains("<Swallow width=\"32\" height=\"32\" name=\"xclock\">xclock</Swallow>"));
+        assert!(changed.contains("    <Group>\n        <Name>xclock</Name>\n        <Option>drag</Option>\n    </Group>\n"));
+        // Only the keyboard has no title.
+        assert_eq!(changed.matches("<Option>notitle</Option>").count(), 1);
+        assert!(changed.contains("<Class>svkbd</Class><Option>notitle</Option>"));
+        assert_eq!(with_musl_clock_format(r#"<Clock format="%k:%M"/> <Program>%l</Program>"#), r#"<Clock format="%H:%M"/> <Program>%l</Program>"#);
     }
 }

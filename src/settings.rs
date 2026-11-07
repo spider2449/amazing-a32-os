@@ -12,6 +12,9 @@ const SCREEN_TIMEOUTS: [Option<u64>; 8] = [Some(15), Some(30), Some(60), Some(12
 const BACKLIGHT_LEVELS: [u32; 6] = [16, 32, 64, 128, 192, 255];
 /// How long a finger must stay still on the desktop for the right button.
 const HOLD_TIMES_MS: [u64; 5] = [800, 1000, 1500, 2000, 2500];
+/// Time zones as whole hours from UTC, which covers most places. Alpine has no
+/// zone files, so programs there get this as a POSIX `TZ` value.
+const TIME_ZONE_HOURS: std::ops::RangeInclusive<i8> = -12..=14;
 
 /// One line of the settings page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,10 +23,12 @@ pub enum Setting {
     Brightness,
     TouchWakes,
     RightClickHold,
+    TimeZone,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 4] = [Setting::ScreenOff, Setting::Brightness, Setting::TouchWakes, Setting::RightClickHold];
+    pub const ALL: [Setting; 5] =
+        [Setting::ScreenOff, Setting::Brightness, Setting::TouchWakes, Setting::RightClickHold, Setting::TimeZone];
 
     /// The name on the page.
     pub fn label(self) -> &'static str {
@@ -32,6 +37,7 @@ impl Setting {
             Setting::Brightness => "BRIGHTNESS",
             Setting::TouchWakes => "TOUCH WAKES THE SCREEN",
             Setting::RightClickHold => "DESKTOP RIGHT CLICK HOLD",
+            Setting::TimeZone => "TIME ZONE, FOR CLOCKS IN ALPINE",
         }
     }
 
@@ -50,6 +56,7 @@ impl Setting {
             Setting::Brightness => "brightness",
             Setting::TouchWakes => "touch-wakes",
             Setting::RightClickHold => "right-click-hold",
+            Setting::TimeZone => "time-zone",
         }
     }
 }
@@ -62,6 +69,8 @@ pub struct Settings {
     brightness: usize,
     touch_wakes: bool,
     hold: usize,
+    /// Hours from UTC.
+    time_zone: i8,
 }
 
 impl Default for Settings {
@@ -72,7 +81,7 @@ impl Default for Settings {
 
 impl Settings {
     /// What the system did before these could be changed.
-    pub const DEFAULT: Settings = Settings { screen_off: 2, brightness: 2, touch_wakes: true, hold: 2 };
+    pub const DEFAULT: Settings = Settings { screen_off: 2, brightness: 2, touch_wakes: true, hold: 2, time_zone: 0 };
 
     pub fn screen_timeout(&self) -> Option<Duration> {
         SCREEN_TIMEOUTS[self.screen_off].map(Duration::from_secs)
@@ -91,6 +100,15 @@ impl Settings {
         Duration::from_millis(HOLD_TIMES_MS[self.hold])
     }
 
+    /// The time zone as a POSIX `TZ` value, which needs no zone files. Its sign is
+    /// the opposite of the usual one, and the name in `<>` is what `%Z` shows.
+    pub fn tz(&self) -> String {
+        match self.time_zone {
+            0 => "UTC0".to_string(),
+            hours => format!("<{hours:+03}>{}", -hours),
+        }
+    }
+
     /// The value as the page shows it.
     pub fn value_text(&self, setting: Setting) -> String {
         match setting {
@@ -105,6 +123,8 @@ impl Settings {
                 let millis = HOLD_TIMES_MS[self.hold];
                 format!("{}.{} s", millis / 1000, millis % 1000 / 100)
             }
+            Setting::TimeZone if self.time_zone == 0 => "UTC".to_string(),
+            Setting::TimeZone => format!("UTC{:+}", self.time_zone),
         }
     }
 
@@ -118,6 +138,12 @@ impl Settings {
             Setting::Brightness => self.brightness = next(self.brightness, BACKLIGHT_LEVELS.len()),
             Setting::TouchWakes => self.touch_wakes = up,
             Setting::RightClickHold => self.hold = next(self.hold, HOLD_TIMES_MS.len()),
+            Setting::TimeZone => {
+                let moved = if up { self.time_zone + 1 } else { self.time_zone - 1 };
+                if TIME_ZONE_HOURS.contains(&moved) {
+                    self.time_zone = moved;
+                }
+            }
         }
         *self != before
     }
@@ -129,6 +155,7 @@ impl Settings {
             (Setting::Brightness, BACKLIGHT_LEVELS[self.brightness].to_string()),
             (Setting::TouchWakes, if self.touch_wakes { "on" } else { "off" }.to_string()),
             (Setting::RightClickHold, HOLD_TIMES_MS[self.hold].to_string()),
+            (Setting::TimeZone, format!("{:+}", self.time_zone)),
         ];
         lines.iter().map(|(setting, value)| format!("{}={value}\n", setting.key())).collect()
     }
@@ -157,6 +184,10 @@ impl Settings {
             } else if key == Setting::RightClickHold.key() {
                 let found = value.parse().ok().and_then(|millis: u64| HOLD_TIMES_MS.iter().position(|&option| option == millis));
                 settings.hold = position(found, settings.hold);
+            } else if key == Setting::TimeZone.key() {
+                if let Some(hours) = value.parse::<i8>().ok().filter(|hours| TIME_ZONE_HOURS.contains(hours)) {
+                    settings.time_zone = hours;
+                }
             }
         }
         settings
@@ -218,7 +249,7 @@ mod tests {
         settings.step(Setting::TouchWakes, false);
         settings.step(Setting::RightClickHold, true);
         let text = settings.to_text();
-        assert_eq!(text, "screen-off=120\nbrightness=32\ntouch-wakes=off\nright-click-hold=2000\n");
+        assert_eq!(text, "screen-off=120\nbrightness=32\ntouch-wakes=off\nright-click-hold=2000\ntime-zone=+0\n");
         assert_eq!(Settings::from_text(&text), settings);
 
         for _ in 0..10 {
@@ -236,5 +267,25 @@ mod tests {
         assert_eq!(partly.backlight(), "255");
         assert_eq!(partly.screen_timeout(), None);
         assert!(partly.touch_wakes());
+    }
+
+    #[test]
+    fn time_zones_become_posix_values() {
+        let mut settings = Settings::default();
+        assert_eq!((settings.tz(), settings.value_text(Setting::TimeZone)), ("UTC0".to_string(), "UTC".to_string()));
+        for _ in 0..8 {
+            settings.step(Setting::TimeZone, true);
+        }
+        // POSIX counts west as positive, so UTC+8 is `-8`.
+        assert_eq!((settings.tz(), settings.value_text(Setting::TimeZone)), ("<+08>-8".to_string(), "UTC+8".to_string()));
+        assert!(settings.to_text().contains("time-zone=+8\n"));
+        assert_eq!(Settings::from_text(&settings.to_text()), settings);
+        for _ in 0..30 {
+            settings.step(Setting::TimeZone, false);
+        }
+        assert_eq!((settings.tz(), settings.value_text(Setting::TimeZone)), ("<-12>12".to_string(), "UTC-12".to_string()));
+        assert!(!settings.step(Setting::TimeZone, false));
+        assert_eq!(Settings::from_text("time-zone=15\n"), Settings::default());
+        assert_eq!(Settings::from_text("time-zone=-5\n").tz(), "<-05>5");
     }
 }
