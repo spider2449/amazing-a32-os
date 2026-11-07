@@ -65,6 +65,7 @@ extern "C" {
         length: c_uint,
     ) -> c_int;
     fn umount(target: *const c_char) -> c_int;
+    fn sethostname(name: *const c_char, length: usize) -> c_int;
     fn statvfs(path: *const c_char, buffer: *mut c_void) -> c_int;
     fn mount(
         source: *const c_char,
@@ -439,6 +440,7 @@ const REBOOT_CMD_RESTART2: c_ulong = 0xa1b2_c3d4;
 const REBOOT_CMD_POWER_OFF: c_ulong = 0x4321_fedc;
 
 /// Filesystems as (fstype, mount point). `/dev` must come first for logging.
+const HOSTNAME: &str = "a32";
 const MOUNTS: &[(&str, &str)] = &[
     ("tmpfs", "/dev"),
     ("devpts", "/dev/pts"),
@@ -489,6 +491,11 @@ pub fn run() -> ! {
         }
     }
 
+    // The kernel starts with "(none)", which shell prompts and sshd would show.
+    // SAFETY: the pointer and length describe a valid byte string.
+    if unsafe { sethostname(HOSTNAME.as_ptr().cast(), HOSTNAME.len()) } != 0 {
+        errors.push(format!("hostname failed: {}", io::Error::last_os_error()));
+    }
     // SAFETY: this klogctl action does not use the buffer argument.
     if unsafe { klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, ptr::null_mut(), CONSOLE_LOG_LEVEL) } < 0 {
         errors.push(format!("console log level failed: {}", io::Error::last_os_error()));
