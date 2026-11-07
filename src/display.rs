@@ -180,13 +180,16 @@ impl Canvas {
     pub fn draw_rgb(&mut self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
         let bytes = self.format.bytes_per_pixel() as usize;
         let stride = self.format.stride as usize;
-        for row in 0..height.min(self.format.height.saturating_sub(y)) {
-            for column in 0..width.min(self.format.width.saturating_sub(x)) {
-                let at = ((row * width + column) * 3) as usize;
-                let Some(pixel) = data.get(at..at + 3) else { return };
-                let encoded = self.format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
-                let target = (y + row) as usize * stride + (x + column) as usize * bytes;
-                self.pixels[target..target + bytes].copy_from_slice(&encoded[..bytes]);
+        let columns = width.min(self.format.width.saturating_sub(x)) as usize;
+        let rows = height.min(self.format.height.saturating_sub(y)) as usize;
+        let format = self.format;
+        // Row by row, stopping where `data` runs out.
+        for (row, source) in data.chunks(width as usize * 3).take(rows).enumerate() {
+            let start = (y as usize + row) * stride + x as usize * bytes;
+            let target = &mut self.pixels[start..start + columns * bytes];
+            for (pixel, out) in source.chunks_exact(3).take(columns).zip(target.chunks_exact_mut(bytes)) {
+                let encoded = format.encode(Rgb(pixel[0], pixel[1], pixel[2])).to_le_bytes();
+                out.copy_from_slice(&encoded[..bytes]);
             }
         }
     }
@@ -338,6 +341,22 @@ pub mod tests {
     fn pixel(canvas: &Canvas, x: u32, y: u32) -> [u8; 4] {
         let at = (y * canvas.format.stride + x * 4) as usize;
         canvas.pixels()[at..at + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn draws_images_clipped_to_the_frame_and_their_data() {
+        let mut canvas = Canvas::new(rgba8888());
+        // 2x2 at the right edge: the second column is off the frame.
+        canvas.draw_rgb(479, 10, 2, 2, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(pixel(&canvas, 479, 10), [1, 2, 3, 255]);
+        assert_eq!(pixel(&canvas, 479, 11), [7, 8, 9, 255]);
+        assert_eq!(pixel(&canvas, 0, 11), [0, 0, 0, 0], "must not wrap to the next row");
+        // At the bottom edge, and with data for only one and a half rows.
+        canvas.draw_rgb(5, 853, 2, 2, &[1, 1, 1, 2, 2, 2]);
+        assert_eq!(pixel(&canvas, 6, 853), [2, 2, 2, 255]);
+        canvas.draw_rgb(20, 20, 2, 2, &[3, 3, 3, 4, 4, 4, 5, 5, 5]);
+        assert_eq!(pixel(&canvas, 20, 21), [5, 5, 5, 255]);
+        assert_eq!(pixel(&canvas, 21, 21), [0, 0, 0, 0]);
     }
 
     #[test]

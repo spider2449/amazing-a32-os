@@ -922,10 +922,13 @@ makes the other fail as busy.
 Tested from a RAM boot with `ui tap`, screenshots and the log: the rear and front
 views, switching between them, BACK stopping the view, and the 3 minute limit, after
 which the screen, still on, kept the last frame and said the view had ended. The
-camera delivered 14.4-14.8 fps (rear) and 12.8 fps (front), and the panel drew
-8.1-8.3 and 6.9 fps of them; which
-part of fitting the frame to 480x640 and redrawing the page limits it was not
-measured. The first build never
+camera delivered 14.4-14.8 fps (rear) and 12.8 fps (front), and the panel first drew
+8.1-8.3 and 6.9 fps of them. The log then showed, per frame, 74 and 96 ms fitting the
+frame to 480x640, 30 ms drawing the page and 15 ms copying it to the screen. Fitting
+now works out each column's source pixels once and sums whole rows, with output
+equal to the old code's (a unit test compares them), and drawing an image goes row
+by row: fitting took 28 and 49 ms, and the panel drew 13.8 fps of 16.0 (rear) and
+10.6 of 12.7 (front). The first build never
 drew a frame, because the panel loop handled every queued event before drawing and
 live frames kept arriving; it now handles only what was queued when it woke.
 After flashing, a rear view drew 7.9 fps for 9 s and STOP ended it.

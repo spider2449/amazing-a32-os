@@ -338,6 +338,11 @@ struct LiveView {
     started: Instant,
     /// Frames the panel took from `frame` and drew.
     shown: u32,
+    /// Panel time while it ran: fitting frames, reading the status and drawing
+    /// the page, and copying it to the screen.
+    fitting: Duration,
+    drawing: Duration,
+    presenting: Duration,
 }
 
 impl LiveView {
@@ -384,7 +389,7 @@ impl LiveView {
             // Ignored by the panel once this view was stopped or replaced.
             let _ = panel.send(PanelInput::LiveEnded(number, message));
         })?;
-        Ok(LiveView { number, stop, frame, thread, started: Instant::now(), shown: 0 })
+        Ok(LiveView { number, stop, frame, thread, started: Instant::now(), shown: 0, fitting: Duration::ZERO, drawing: Duration::ZERO, presenting: Duration::ZERO })
     }
 
     /// Stops the view and waits for the camera to be free, which takes up to a
@@ -393,7 +398,15 @@ impl LiveView {
         self.stop.store(true, Ordering::Release);
         let _ = self.thread.join();
         let seconds = self.started.elapsed().as_secs_f32().max(0.001);
-        log(&format!("panel: live view showed {} frames ({:.1} fps)", self.shown, self.shown as f32 / seconds));
+        let per_frame = |total: Duration| total.as_millis() / u128::from(self.shown.max(1));
+        log(&format!(
+            "panel: live view showed {} frames ({:.1} fps); per frame {} ms fit, {} ms draw, {} ms present",
+            self.shown,
+            self.shown as f32 / seconds,
+            per_frame(self.fitting),
+            per_frame(self.drawing),
+            per_frame(self.presenting),
+        ));
     }
 }
 
@@ -1334,11 +1347,17 @@ fn run_status_screen() -> io::Result<()> {
             live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
             was_on = false;
         } else if on {
+            let t = Instant::now();
             let status = snapshot();
             // Taps until the next drawing pick from these, which are what is shown.
             panel.set_sensors(status.bluetooth_saved.clone(), status.bluetooth_candidates.clone());
             panel.render(&mut canvas, &status);
+            let drawn = Instant::now();
             framebuffer.present(canvas.pixels())?;
+            if let Some(view) = live.as_mut() {
+                view.drawing += drawn - t;
+                view.presenting += drawn.elapsed();
+            }
         }
 
         // Redraw when something changes, and otherwise once a second.
@@ -1397,7 +1416,9 @@ fn run_status_screen() -> io::Result<()> {
                         let image = view.frame.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
                         if let Some(image) = image {
                             last_use = Instant::now();
+                            let t = Instant::now();
                             panel.show_live(&image);
+                            view.fitting += t.elapsed();
                             view.shown += 1;
                         }
                     }

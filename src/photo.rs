@@ -255,22 +255,31 @@ pub fn fit(image: &Rgb, max_width: usize, max_height: usize) -> Rgb {
     let scale = (max_width as f32 / image.width as f32).min(max_height as f32 / image.height as f32).min(1.0);
     let width = ((image.width as f32 * scale) as usize).max(1);
     let height = ((image.height as f32 * scale) as usize).max(1);
+    // The source span behind each output position, from `start` up to `end`.
+    let span = |index: usize, out: usize, source: usize| {
+        let start = index * source / out;
+        (start, ((index + 1) * source / out).max(start + 1))
+    };
+    let columns: Vec<(usize, usize)> = (0..width).map(|x| span(x, width, image.width)).collect();
+    let line = image.width * 3;
+    let mut sums = vec![0u32; width * 3];
     let mut data = Vec::with_capacity(width * height * 3);
     for y in 0..height {
-        let (top, bottom) = (y * image.height / height, ((y + 1) * image.height / height).max(y * image.height / height + 1));
-        for x in 0..width {
-            let (left, right) = (x * image.width / width, ((x + 1) * image.width / width).max(x * image.width / width + 1));
-            let mut sums = [0u32; 3];
-            for sy in top..bottom {
-                for sx in left..right {
-                    let at = (sy * image.width + sx) * 3;
-                    for c in 0..3 {
-                        sums[c] += u32::from(image.data[at + c]);
-                    }
+        let (top, bottom) = span(y, height, image.height);
+        sums.fill(0);
+        // Whole source rows at a time, so the columns are worked out once.
+        for row in image.data[top * line..bottom * line].chunks_exact(line) {
+            for (sum, &(left, right)) in sums.chunks_exact_mut(3).zip(&columns) {
+                for pixel in row[left * 3..right * 3].chunks_exact(3) {
+                    sum[0] += u32::from(pixel[0]);
+                    sum[1] += u32::from(pixel[1]);
+                    sum[2] += u32::from(pixel[2]);
                 }
             }
+        }
+        for (sum, &(left, right)) in sums.chunks_exact(3).zip(&columns) {
             let count = ((bottom - top) * (right - left)) as u32;
-            data.extend(sums.iter().map(|sum| (sum / count) as u8));
+            data.extend(sum.iter().map(|value| (value / count) as u8));
         }
     }
     Rgb { width, height, data }
@@ -839,6 +848,46 @@ mod tests {
         assert!(exposure_settled(170.0, Exposure { shutter: 10, gain: 64 }, limits));
         assert!(exposure_settled(20.0, capped, limits));
         assert!(!exposure_settled(20.0, Exposure { shutter: 10, gain: 64 }, limits));
+    }
+
+    /// The first `fit`, one output pixel at a time, which the faster one must match.
+    fn fit_by_pixel(image: &Rgb, max_width: usize, max_height: usize) -> Rgb {
+        let scale = (max_width as f32 / image.width as f32).min(max_height as f32 / image.height as f32).min(1.0);
+        let width = ((image.width as f32 * scale) as usize).max(1);
+        let height = ((image.height as f32 * scale) as usize).max(1);
+        let mut data = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            let (top, bottom) = (y * image.height / height, ((y + 1) * image.height / height).max(y * image.height / height + 1));
+            for x in 0..width {
+                let (left, right) = (x * image.width / width, ((x + 1) * image.width / width).max(x * image.width / width + 1));
+                let mut sums = [0u32; 3];
+                for sy in top..bottom {
+                    for sx in left..right {
+                        let at = (sy * image.width + sx) * 3;
+                        for c in 0..3 {
+                            sums[c] += u32::from(image.data[at + c]);
+                        }
+                    }
+                }
+                let count = ((bottom - top) * (right - left)) as u32;
+                data.extend(sums.iter().map(|sum| (sum / count) as u8));
+            }
+        }
+        Rgb { width, height, data }
+    }
+
+    #[test]
+    fn fit_matches_the_pixel_by_pixel_version() {
+        // Live frames (rear, front), a photo, and odd sizes.
+        for (width, height, max_width, max_height) in
+            [(486, 648, 480, 640), (600, 800, 480, 640), (972, 1296, 480, 640), (7, 5, 3, 3), (5, 9, 100, 4)]
+        {
+            let data = (0..width * height * 3).map(|i| (i * 7919 % 251) as u8).collect();
+            let image = Rgb { width, height, data };
+            let (fast, slow) = (fit(&image, max_width, max_height), fit_by_pixel(&image, max_width, max_height));
+            assert_eq!((fast.width, fast.height), (slow.width, slow.height));
+            assert!(fast.data == slow.data, "{width}x{height} into {max_width}x{max_height} differs");
+        }
     }
 
     #[test]
