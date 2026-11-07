@@ -260,6 +260,14 @@ const SENSOR_HISTORY_LIMIT: u64 = 1024 * 1024;
 const SENSOR_HISTORY_INTERVAL: Duration = Duration::from_secs(300);
 // The saved sensors, one address per line.
 const SAVED_SENSORS: &str = "/data/a32/bluetooth-sensors";
+/// The password for the cameras on the status page; without it they are off.
+const WEB_PASSWORD: &str = "/data/a32/web-password";
+/// After a wrong camera password the web service waits this long, which slows
+/// guessing, since it serves one request at a time.
+const WRONG_PASSWORD_DELAY: Duration = Duration::from_secs(1);
+/// Live video ends after this long; reloading the page starts it again.
+const LIVE_LIMIT: Duration = Duration::from_secs(10 * 60);
+const LIVE_QUALITY: u32 = 70;
 
 /// The BLE scan: whether it is wanted, what it is doing, and what it heard.
 struct BluetoothState {
@@ -590,7 +598,22 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
         request.extend_from_slice(&buffer[..length]);
     }
     let plain = "text/plain; charset=utf-8";
-    let reply = match web::route(&String::from_utf8_lossy(&request)) {
+    let request = String::from_utf8_lossy(&request);
+    let route = web::route(&request);
+    if let Route::Photo(_) | Route::Live(_) = route {
+        let Some(password) = web_password() else {
+            let text = "the cameras are off until a web password is set on the console\n";
+            return stream.write_all(&web::response("403 Forbidden", plain, text));
+        };
+        if !web::authorized(&request, &password) {
+            if request.lines().any(|line| line.to_ascii_lowercase().starts_with("authorization:")) {
+                log(&format!("web: wrong camera password from {}", peer_text(&stream)));
+                thread::sleep(WRONG_PASSWORD_DELAY);
+            }
+            return stream.write_all(&web::unauthorized());
+        }
+    }
+    let reply = match route {
         Route::Page => {
             let tail = web::last_lines(&log_tail(), WEB_LOG_LINES);
             let sensors = sensor_rows();
@@ -609,11 +632,121 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
             Ok(photo) => web::response_bytes("200 OK", "image/jpeg", &photo.jpeg),
             Err(err) => web::response("503 Service Unavailable", plain, &format!("camera: {err}\n")),
         },
+        // Lasts as long as the viewer watches, so it gets its own thread.
+        Route::Live(camera) => {
+            thread::spawn(move || serve_live(stream, camera));
+            return Ok(());
+        }
         Route::NotFound => web::response("404 Not Found", plain, "not found\n"),
         Route::MethodNotAllowed => web::response("405 Method Not Allowed", plain, "only GET\n"),
         Route::BadRequest => web::response("400 Bad Request", plain, "bad request\n"),
     };
     stream.write_all(&reply)
+}
+
+/// The camera password, if one is set.
+fn web_password() -> Option<String> {
+    let text = fs::read_to_string(WEB_PASSWORD).ok()?;
+    let password = text.trim_end_matches('\n');
+    web::password_problem(password).is_none().then(|| password.to_string())
+}
+
+fn peer_text(stream: &TcpStream) -> String {
+    stream.peer_addr().map_or_else(|_| "an unknown address".to_string(), |address| address.ip().to_string())
+}
+
+/// What the encoding thread of a live view did.
+#[derive(Default)]
+struct LiveSending {
+    frames: u32,
+    bytes: usize,
+    encoding: Duration,
+    sending: Duration,
+}
+
+/// Sends live video as MJPEG until the viewer leaves or `LIVE_LIMIT` passes.
+/// The camera thread develops frames while a second thread encodes and sends
+/// the last one, so two cores work at once; a frame that arrives while the
+/// encoder is busy is dropped rather than queued, which keeps the delay short.
+fn serve_live(mut stream: TcpStream, name: &'static str) {
+    let Some(camera) = camera::by_name(name) else { return };
+    let peer = peer_text(&stream);
+    let _ = stream.set_nodelay(true);
+    let mut output = match stream.try_clone() {
+        Ok(output) => output,
+        Err(err) => {
+            log(&format!("camera: {name} live view failed: {err}"));
+            return;
+        }
+    };
+    log(&format!("camera: {name} live view for {peer}"));
+    // A rendezvous channel: a frame is only handed over when the encoder waits.
+    let (frames, received) = mpsc::sync_channel::<photo::Rgb>(0);
+    let encoder = thread::spawn(move || {
+        let mut done = LiveSending::default();
+        for image in received {
+            let t = Instant::now();
+            let jpeg = photo::encode_jpeg(&image, LIVE_QUALITY);
+            done.encoding += t.elapsed();
+            let t = Instant::now();
+            if done.frames == 0 && output.write_all(web::live_header()).is_err() {
+                break;
+            }
+            if output.write_all(&web::live_part(&jpeg)).is_err() {
+                break;
+            }
+            done.sending += t.elapsed();
+            done.frames += 1;
+            done.bytes += jpeg.len();
+        }
+        done
+    });
+    let mut dropped = 0u32;
+    let result = camera::live(camera, LIVE_LIMIT, |image| match frames.try_send(image) {
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(_)) => {
+            dropped += 1;
+            Ok(())
+        }
+        // The encoder stopped: the viewer left.
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
+    });
+    drop(frames);
+    let sent = encoder.join().unwrap_or_default();
+    match result {
+        Ok(summary) => {
+            let developed = summary.sent.max(1);
+            let per_frame = |total: Duration, count: u32| total.as_millis() / u128::from(count.max(1));
+            let seconds = summary.elapsed.as_secs_f32().max(0.001);
+            log(&format!(
+                "camera: {name} live view ended: sent {} frames {}x{} in {:.0} s ({:.1} fps), {} KB each; \
+                 developed {} ({} sensor frames passed over, {} dropped while encoding); per frame {} ms copy, \
+                 {} ms develop, {} ms encode, {} ms send; shutter {} gain {:.2}x",
+                sent.frames,
+                summary.width,
+                summary.height,
+                seconds,
+                sent.frames as f32 / seconds,
+                sent.bytes / 1024 / sent.frames.max(1) as usize,
+                summary.sent,
+                summary.skipped,
+                dropped,
+                per_frame(summary.copying, developed),
+                per_frame(summary.developing, developed),
+                per_frame(sent.encoding, sent.frames),
+                per_frame(sent.sending, sent.frames),
+                summary.exposure.shutter,
+                summary.exposure.gain as f32 / photo::UNIT_GAIN as f32,
+            ));
+        }
+        Err(err) => {
+            log(&format!("camera: {name} live view failed: {err}"));
+            if sent.frames == 0 {
+                let reply = web::response("503 Service Unavailable", "text/plain; charset=utf-8", &format!("camera: {err}\n"));
+                let _ = stream.write_all(&reply);
+            }
+        }
+    }
 }
 
 /// Runs the BLE scan while it is wanted. It starts once the Wi-Fi start has made the
@@ -2225,6 +2358,34 @@ impl Platform for KernelPlatform {
         let photo = take_photo(camera)?;
         file.write_all(&photo.jpeg)?;
         Ok(format!("{}, saved to {path}", describe_photo(camera, &photo)))
+    }
+
+    fn web_password(&self, password: Option<&str>) -> io::Result<String> {
+        match password {
+            None => {}
+            Some(_) if !DATA_READY.load(Ordering::Acquire) => {
+                return Err(io::Error::other("/data is not mounted, so the password could not be kept"));
+            }
+            Some("off") => {
+                match fs::remove_file(WEB_PASSWORD) {
+                    Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+                    _ => File::open(SETTINGS_DIR)?.sync_all()?,
+                }
+                log("web: camera password removed, cameras off");
+            }
+            Some(password) => {
+                if let Some(problem) = web::password_problem(password) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, problem));
+                }
+                write_private_file(WEB_PASSWORD, &format!("{password}\n"))?;
+                log("web: camera password set");
+            }
+        }
+        Ok(if web_password().is_some() {
+            "the web cameras are on, with a password (any user name)".to_string()
+        } else {
+            "the web cameras are off: no password is set".to_string()
+        })
     }
 
     fn power_off(&self) -> io::Error {

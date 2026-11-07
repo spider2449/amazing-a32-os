@@ -7,7 +7,8 @@
 //! `libcam.halsensor.so` (SeninfDrvImp, HalSensor::seninfControl); the ISP values
 //! were read from the hardware while stock Android previewed (camera_regs.rs).
 //! Auto exposure adjusts shutter and gain from frame to frame, and photo.rs
-//! turns the last frame into a JPEG. One photo at a time.
+//! turns the last frame into a JPEG. Live video keeps streaming and develops
+//! smaller images of the frames it keeps up with. One photo or view at a time.
 
 use crate::camera_regs;
 use crate::photo::{self, Exposure, ExposureLimits, Rotation, UNIT_GAIN};
@@ -107,6 +108,8 @@ pub struct Camera {
     limits: ExposureLimits,
     /// Rotation that gives the stock camera's portrait orientation.
     pub rotation: Rotation,
+    /// Live video uses every this many quads across and down.
+    live_step: usize,
 }
 
 pub const REAR: Camera = Camera {
@@ -121,6 +124,7 @@ pub const REAR: Camera = Camera {
     // The frame is 2992 lines at 20 fps.
     limits: ExposureLimits { max_shutter: 2980, max_gain: 8 * UNIT_GAIN },
     rotation: Rotation::Clockwise90,
+    live_step: 2, // 486x648
 };
 
 pub const FRONT: Camera = Camera {
@@ -134,6 +138,7 @@ pub const FRONT: Camera = Camera {
     regs: camera_regs::FRONT,
     limits: ExposureLimits { max_shutter: 1230, max_gain: 8 * UNIT_GAIN },
     rotation: Rotation::Clockwise270,
+    live_step: 1, // 600x800
 };
 
 pub fn by_name(name: &str) -> Option<&'static Camera> {
@@ -146,8 +151,23 @@ pub fn by_name(name: &str) -> Option<&'static Camera> {
 
 /// The last exposure each camera settled on, as a start for the next photo.
 static LAST_EXPOSURE: Mutex<[Option<Exposure>; 2]> = Mutex::new([None, None]);
-/// Only one photo at a time: both cameras share the ISP and the sensor driver.
+/// One photo or live view at a time: both cameras share the ISP and the sensor
+/// driver. A request while it is held fails at once, since a live view can last
+/// minutes.
 static BUSY: Mutex<()> = Mutex::new(());
+
+fn busy() -> io::Error {
+    io::Error::new(io::ErrorKind::WouldBlock, "the camera is busy")
+}
+
+fn remembered_exposure(camera: &Camera) -> Exposure {
+    LAST_EXPOSURE.lock().unwrap_or_else(|p| p.into_inner())[(camera.socket - 1) as usize]
+        .unwrap_or(Exposure { shutter: camera.limits.max_shutter / 2, gain: 2 * UNIT_GAIN })
+}
+
+fn remember_exposure(camera: &Camera, exposure: Exposure) {
+    LAST_EXPOSURE.lock().unwrap_or_else(|p| p.into_inner())[(camera.socket - 1) as usize] = Some(exposure);
+}
 
 /// A finished photo and how it was taken.
 pub struct Photo {
@@ -164,13 +184,11 @@ pub struct Photo {
 
 /// Takes a photo and encodes it as a JPEG.
 pub fn take(camera: &Camera, quality: u32) -> io::Result<Photo> {
-    let _busy = BUSY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _busy = BUSY.try_lock().map_err(|_| busy())?;
     let started = Instant::now();
-    let slot = (camera.socket - 1) as usize;
-    let start = LAST_EXPOSURE.lock().unwrap_or_else(|p| p.into_inner())[slot]
-        .unwrap_or(Exposure { shutter: camera.limits.max_shutter / 2, gain: 2 * UNIT_GAIN });
-    let frame = capture(camera, start)?;
-    LAST_EXPOSURE.lock().unwrap_or_else(|p| p.into_inner())[slot] = Some(frame.exposure);
+    let start = remembered_exposure(camera);
+    let frame = session(camera, start, |session| photo_frame(session, start))?;
+    remember_exposure(camera, frame.exposure);
     let image = photo::develop(&frame.raw, camera.stride, camera.width, camera.height, camera.rotation);
     let jpeg = photo::encode_jpeg(&image, quality);
     Ok(Photo {
@@ -461,7 +479,24 @@ fn wait_frames(isp: &Registers, count: u32) -> io::Result<u32> {
     }
 }
 
-fn capture(camera: &Camera, start: Exposure) -> io::Result<Frame> {
+/// An open, streaming camera: the ISP writes each frame into `buffer`.
+struct Session<'a> {
+    camera: &'a Camera,
+    sensor: Sensor<'a>,
+    isp: &'a Registers,
+    buffer: &'a IonBuffer<'a>,
+}
+
+impl Session<'_> {
+    fn mean_level(&self, raw: &[u8]) -> f32 {
+        let camera = self.camera;
+        photo::mean_level(raw, camera.stride, camera.width, camera.height, 16)
+    }
+}
+
+/// Powers the camera, starts streaming with exposure `start`, runs `body`, then
+/// stops streaming and powers the camera off whatever `body` returned.
+fn session<T>(camera: &Camera, start: Exposure, body: impl FnOnce(&Session) -> io::Result<T>) -> io::Result<T> {
     ensure_nodes()?;
     let isp_file = OpenOptions::new().read(true).write(true).open(ISP_DEVICE)?;
     let sensor_file = OpenOptions::new().read(true).write(true).open(SENSOR_DEVICE)?;
@@ -481,14 +516,15 @@ fn capture(camera: &Camera, start: Exposure) -> io::Result<Frame> {
     }
     mclk(&sensor_file, &seninf, true)?;
 
-    let sensor = Sensor { file: &sensor_file, socket: camera.socket };
     let result = (|| {
         let mut drivers = [(camera.socket << 16) | camera.list_index, 0u32];
         call(&sensor_file, SENSOR_SET_DRIVER, drivers.as_mut_ptr().cast(), "sensor set driver")?;
         let mut current = camera.socket;
         call(&sensor_file, SENSOR_SET_CURRENT, (&mut current as *mut u32).cast(), "sensor set current")?;
         call_plain(&sensor_file, SENSOR_OPEN, "sensor open")?;
-        stream(camera, &sensor, &isp, &seninf, &mipi, &buffer, start)
+        let sensor = Sensor { file: &sensor_file, socket: camera.socket };
+        start_streaming(camera, &sensor, &isp, &seninf, &mipi, &buffer, start)?;
+        body(&Session { camera, sensor, isp: &isp, buffer: &buffer })
     })();
 
     isp.clear(TG_VF_CON, 1);
@@ -499,7 +535,7 @@ fn capture(camera: &Camera, start: Exposure) -> io::Result<Frame> {
     result
 }
 
-fn stream(
+fn start_streaming(
     camera: &Camera,
     sensor: &Sensor,
     isp: &Registers,
@@ -507,7 +543,7 @@ fn stream(
     mipi: &Registers,
     buffer: &IonBuffer,
     start: Exposure,
-) -> io::Result<Frame> {
+) -> io::Result<()> {
     // HalSensor::seninfControl for this sensor.
     isp.field(TG_GRAB_PXL, 16, 15, camera.width as u32);
     isp.field(TG_GRAB_PXL, 0, 15, 0);
@@ -526,8 +562,7 @@ fn stream(
     let mut config = [0u8; 256];
     let mut control = [camera.socket, 0, window.as_mut_ptr() as u32, config.as_mut_ptr() as u32];
     call(sensor.file, SENSOR_CONTROL, control.as_mut_ptr().cast(), "sensor preview")?;
-    let mut exposure = start;
-    sensor.set_exposure(exposure)?;
+    sensor.set_exposure(start)?;
 
     // ISP pass 1 as stock Android set it, writing raw frames to our buffer only.
     for &(offset, value) in camera.regs {
@@ -541,18 +576,24 @@ fn stream(
     isp.write(IMGO_BASE, buffer.device_address);
     isp.write(CTL_DMA_EN, 1); // IMGO
     isp.set(TG_VF_CON, 1);
+    Ok(())
+}
 
-    // Auto exposure: measure, adjust, let the change reach a frame, repeat.
+/// Auto exposure until it settles, then one whole frame with the ISP stopped.
+fn photo_frame(session: &Session, start: Exposure) -> io::Result<Frame> {
+    let (camera, isp) = (session.camera, session.isp);
+    let mut exposure = start;
+    // Measure, adjust, let the change reach a frame, repeat.
     let mut frames = wait_frames(isp, 2)?;
     let mut mean = 0.0;
     for _ in 0..8 {
         frames += wait_frames(isp, 1)?;
-        mean = photo::mean_level(buffer.bytes(), camera.stride, camera.width, camera.height, 16);
+        mean = session.mean_level(session.buffer.bytes());
         if photo::exposure_settled(mean, exposure, camera.limits) {
             break;
         }
         exposure = photo::next_exposure(exposure, mean, camera.limits);
-        sensor.set_exposure(exposure)?;
+        session.sensor.set_exposure(exposure)?;
         // The sensors apply a new exposure one or two frames later.
         frames += wait_frames(isp, 2)?;
     }
@@ -561,5 +602,114 @@ fn stream(
     frames += wait_frames(isp, 1)?;
     isp.clear(TG_VF_CON, 1);
     thread::sleep(Duration::from_millis(150));
-    Ok(Frame { raw: buffer.bytes().to_vec(), exposure, mean_level: mean, frames })
+    Ok(Frame { raw: session.buffer.bytes().to_vec(), exposure, mean_level: mean, frames })
+}
+
+/// Waits for the next frame after `last` (a frame count), returning the new count.
+fn next_frame(isp: &Registers, last: u32) -> io::Result<u32> {
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        let count = frame_count(isp);
+        if count != last {
+            return Ok(count);
+        }
+        if Instant::now() > deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "the camera sends no frames"));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Copies the lines `develop_scaled` reads at `step`, leaving the rest as they
+/// were. Done right after a frame ends, this stays ahead of the ISP writing the
+/// next frame into the same buffer from the top.
+fn copy_lines(from: &[u8], to: &mut [u8], stride: usize, height: usize, step: usize) {
+    for quad_row in (0..height / 2).step_by(step) {
+        let start = 2 * quad_row * stride;
+        let end = (start + 2 * stride).min(from.len()).min(to.len());
+        to[start..end].copy_from_slice(&from[start..end]);
+    }
+}
+
+/// How a live view went.
+pub struct LiveSummary {
+    /// Frames handed to the caller, and sensor frames passed over meanwhile.
+    pub sent: u32,
+    pub skipped: u32,
+    pub width: usize,
+    pub height: usize,
+    pub exposure: Exposure,
+    pub elapsed: Duration,
+    /// Total time spent copying, developing and in the caller.
+    pub copying: Duration,
+    pub developing: Duration,
+    pub delivering: Duration,
+}
+
+/// Live video: hands a developed image of every frame it keeps up with to
+/// `each`, until `each` fails (for example when a viewer leaves) or `limit`
+/// passes. Auto exposure keeps adjusting. Fails at once if the camera is busy.
+pub fn live(
+    camera: &Camera,
+    limit: Duration,
+    mut each: impl FnMut(photo::Rgb) -> io::Result<()>,
+) -> io::Result<LiveSummary> {
+    let _busy = BUSY.try_lock().map_err(|_| busy())?;
+    let started = Instant::now();
+    let start = remembered_exposure(camera);
+    let mut summary = LiveSummary {
+        sent: 0,
+        skipped: 0,
+        width: 0,
+        height: 0,
+        exposure: start,
+        elapsed: Duration::ZERO,
+        copying: Duration::ZERO,
+        developing: Duration::ZERO,
+        delivering: Duration::ZERO,
+    };
+    let result = session(camera, start, |session| {
+        let mut raw = vec![0u8; camera.stride * camera.height];
+        let mut since_change = 0;
+        let mut count = frame_count(session.isp);
+        while started.elapsed() < limit {
+            let next = next_frame(session.isp, count)?;
+            summary.skipped += (next.wrapping_sub(count) & 0xFF).saturating_sub(1);
+            count = next;
+
+            let t = Instant::now();
+            copy_lines(session.buffer.bytes(), &mut raw, camera.stride, camera.height, camera.live_step);
+            summary.copying += t.elapsed();
+
+            // A new exposure shows up a frame or two later, so wait before judging it.
+            since_change += 1;
+            if since_change >= 3 {
+                let mean = session.mean_level(&raw);
+                if !photo::exposure_settled(mean, summary.exposure, camera.limits) {
+                    summary.exposure = photo::next_exposure(summary.exposure, mean, camera.limits);
+                    session.sensor.set_exposure(summary.exposure)?;
+                    since_change = 0;
+                }
+            }
+
+            let t = Instant::now();
+            let image =
+                photo::develop_scaled(&raw, camera.stride, camera.width, camera.height, camera.rotation, camera.live_step);
+            summary.developing += t.elapsed();
+            (summary.width, summary.height) = (image.width, image.height);
+
+            // The caller failing ends the view; it is not the camera's failure.
+            let t = Instant::now();
+            let delivered = each(image);
+            summary.delivering += t.elapsed();
+            if delivered.is_err() {
+                break;
+            }
+            summary.sent += 1;
+        }
+        Ok(())
+    });
+    remember_exposure(camera, summary.exposure);
+    summary.elapsed = started.elapsed();
+    result.map(|()| summary)
 }

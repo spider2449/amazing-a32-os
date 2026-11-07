@@ -459,13 +459,15 @@ what each returned.
 `http://PHONE_ADDRESS/` shows what the panel's home page shows, and the last 40 lines of
 the persistent log. It reloads itself every 15 seconds. `/status.json` has the same
 values for scripts, and `/bluetooth.json` lists the devices the BLE scan heard, with
-full addresses. The page only reads: it takes nothing but the path, so it has no
-login, and the firewall only lets private addresses reach port 80. It is part of the
+full addresses. These only read: they take nothing but the path, so they have no
+login, and the firewall only lets private addresses reach port 80. The cameras
+(`/camera/...`, see [Cameras](#cameras)) need the web password. It is part of the
 init, with no web server program.
 
 Requests are served one at a time, so that no client can use up the phone's memory or
-threads. A client that connects and sends nothing therefore delays the others by up to
-5 seconds, its time limit. Requests over 4 KiB get `431`, other methods than `GET` get
+threads; only a live camera view gets its own thread, and a second view is refused
+at once. A client that connects and sends nothing therefore delays the others by up
+to 5 seconds, its time limit. Requests over 4 KiB get `431`, other methods than `GET` get
 `405`, and other paths `404`.
 
 Tested from the PC on a RAM boot: the page, the JSON, `404` for `/nope` and
@@ -855,13 +857,36 @@ off, press the power key with USB unplugged, then plug USB back in.
 
 ## Cameras
 
-Rear GC5025 (2592x1944) and front GC2385 (1600x1200) take photos without Android's
-camera stack: `camera rear|front NEW_FILE` on the console, `/camera/rear.jpg` and
-`/camera/front.jpg` on the status page, and a CAMERA page on the panel. Photos are
+Rear GC5025 (2592x1944) and front GC2385 (1600x1200) work without Android's camera
+stack: `camera rear|front NEW_FILE` on the console, photos at `/camera/rear.jpg`
+and `/camera/front.jpg` and live video at `/camera/rear.mjpg` and
+`/camera/front.mjpg` on the status page, and a CAMERA page on the panel. Photos are
 half the sensor size (each 2x2 Bayer quad becomes one pixel), turned to the stock
 camera's portrait orientation, with auto exposure, gray-world white balance and a
-baseline JPEG encoder (`src/photo.rs`). The status page has no login, so anyone who
-can reach it can take a photo.
+baseline JPEG encoder (`src/photo.rs`).
+
+The web cameras need a password, set on the console with `web password NEW` (10 to
+64 printable characters, no spaces; `web password off` removes it). It is kept in
+`/data/a32/web-password`. Without one the camera addresses answer 403. Browsers
+ask for it (HTTP Basic, any user name); a wrong one is logged and answered after a
+second. The status page itself still needs no login. Plain HTTP sends the password
+readably, so it only keeps out people on the network who do not watch its traffic.
+
+Live video is MJPEG (`multipart/x-mixed-replace`), which browsers show directly. The
+camera thread copies each finished frame out of the ION buffer before the ISP
+overwrites it, develops it at a smaller size (rear 486x648 from every other quad,
+front 600x800), and hands it to an encoding thread; a frame that arrives while
+the encoder is busy is dropped, so the picture stays current. Developing and
+encoding each split their rows between the four cores, and the JPEG has a restart
+marker after every row of macroblocks so the rows can be encoded separately. A view
+ends when the viewer leaves or after 10 minutes. Only one photo or view at a time:
+anything else gets 503 "the camera is busy" at once.
+
+Measured on the phone over Wi-Fi on 2026-11-07, quality 70: front 13.3 fps (73 KB
+frames), rear 14.4 fps (67 KB) for 60 s, with the CPU going from 38 to 47 C. Before
+the speed work it was 3.2 and 3.7 fps: the naive DCT, the per-pixel color
+conversion and the float arithmetic per quad took the time, not the network
+(sending is 1-4 ms per frame). Rear photos went from 1.7 s to 1.4 s.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
@@ -883,4 +908,5 @@ because this phone's `/data` was wiped. Experiments are in `scripts/camera/`.
 
 Tested from a RAM boot: rear photo 1.6-1.8 s, front 0.8 s; photos 47-690 KB. The same
 image then booted from flash, joined Wi-Fi and served a front photo in about 1 s.
-Front orientation is not yet checked against a known scene.
+A live frame of a person in a room shows the front orientation is upright; whether it
+is mirrored is not checked.

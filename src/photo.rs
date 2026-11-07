@@ -7,6 +7,7 @@
 //! gray on average, levels are stretched so bright parts reach near white, and
 //! a 2.2 gamma follows. Everything here is plain computation, tested on the host.
 
+#[cfg(test)]
 use std::f32::consts::PI;
 
 /// Exposure in sensor terms: shutter in lines and analog gain with 64 = 1x.
@@ -37,9 +38,21 @@ pub struct Rgb {
 /// Unpacks one line of RAW10 packed least significant bit first.
 pub fn unpack_line(packed: &[u8], width: usize, out: &mut Vec<u16>) {
     out.clear();
+    // Whole groups of 5 bytes hold 4 values.
+    let groups = (width / 4).min(packed.len() / 5);
+    for chunk in packed[..groups * 5].chunks_exact(5) {
+        let [b0, b1, b2, b3, b4] = [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]].map(u16::from);
+        out.extend_from_slice(&[
+            b0 | (b1 & 0x03) << 8,
+            b1 >> 2 | (b2 & 0x0F) << 6,
+            b2 >> 4 | (b3 & 0x3F) << 4,
+            b3 >> 6 | b4 << 2,
+        ]);
+    }
+    // The rest bit by bit.
     let mut bits: u32 = 0;
     let mut count = 0;
-    let mut bytes = packed.iter();
+    let mut bytes = packed[groups * 5..].iter();
     while out.len() < width {
         while count < 10 {
             let Some(&byte) = bytes.next() else { return };
@@ -103,44 +116,78 @@ pub enum Rotation {
 
 /// Develops a raw frame into an RGB image of half its width and height.
 pub fn develop(raw: &[u8], stride: usize, width: usize, height: usize, rotation: Rotation) -> Rgb {
-    let (qw, qh) = (width / 2, height / 2);
+    develop_scaled(raw, stride, width, height, rotation, 1)
+}
+
+/// The same, using only every `step`-th quad across and down, so the image is
+/// `step` times smaller again and quicker to make; for live video. Bands of
+/// rows are worked on by several cores.
+pub fn develop_scaled(raw: &[u8], stride: usize, width: usize, height: usize, rotation: Rotation, step: usize) -> Rgb {
+    let step = step.max(1);
+    let (qw, qh) = (width / (2 * step), height / (2 * step));
     let mut quads = vec![[0u16; 3]; qw * qh];
-    let (mut top, mut bottom) = (Vec::with_capacity(width), Vec::with_capacity(width));
-    let line_bytes = width * 10 / 8;
-    for qy in 0..qh {
-        let row = 2 * qy * stride;
-        let (Some(a), Some(b)) = (raw.get(row..row + line_bytes), raw.get(row + stride..row + stride + line_bytes))
-        else {
-            break;
-        };
-        unpack_line(a, width, &mut top);
-        unpack_line(b, width, &mut bottom);
-        for qx in 0..qw.min(top.len() / 2).min(bottom.len() / 2) {
-            let (r, gr) = (top[2 * qx], top[2 * qx + 1]);
-            let (gb, b) = (bottom[2 * qx], bottom[2 * qx + 1]);
-            quads[qy * qw + qx] = [r, (gr + gb) / 2, b];
-        }
+    if qw == 0 || qh == 0 {
+        return Rgb { width: 0, height: 0, data: Vec::new() };
     }
+
+    // Quads, with each band's channel sums for the white balance.
+    let line_bytes = width * 10 / 8;
+    let band = qh.div_ceil(workers(qh));
+    let band_sums: Vec<[u64; 3]> = std::thread::scope(|scope| {
+        let bands: Vec<_> = quads
+            .chunks_mut(band * qw)
+            .enumerate()
+            .map(|(index, chunk)| {
+                scope.spawn(move || {
+                    let (mut top, mut bottom) = (Vec::with_capacity(width), Vec::with_capacity(width));
+                    let mut sums = [0u64; 3];
+                    for (offset, out) in chunk.chunks_mut(qw).enumerate() {
+                        let row = 2 * (index * band + offset) * step * stride;
+                        let (Some(a), Some(b)) =
+                            (raw.get(row..row + line_bytes), raw.get(row + stride..row + stride + line_bytes))
+                        else {
+                            break;
+                        };
+                        unpack_line(a, width, &mut top);
+                        unpack_line(b, width, &mut bottom);
+                        for qx in 0..qw.min(top.len() / (2 * step)).min(bottom.len() / (2 * step)) {
+                            let x = 2 * qx * step;
+                            let quad = [top[x], (top[x + 1] + bottom[x]) / 2, bottom[x + 1]];
+                            for c in 0..3 {
+                                sums[c] += u64::from(quad[c]);
+                            }
+                            out[qx] = quad;
+                        }
+                    }
+                    sums
+                })
+            })
+            .collect();
+        bands.into_iter().map(|band| band.join().expect("develop worker panicked")).collect()
+    });
 
     // Gray world: scale red and blue so their means match green's.
     let mut sums = [0u64; 3];
-    for quad in &quads {
+    for band in band_sums {
         for c in 0..3 {
-            sums[c] += u64::from(quad[c]);
+            sums[c] += band[c];
         }
     }
-    let mean = |c: usize| (sums[c] as f32 / quads.len().max(1) as f32).max(1.0);
+    let mean = |c: usize| (sums[c] as f32 / quads.len() as f32).max(1.0);
     let gains = [
         (mean(1) / mean(0)).clamp(0.5, 4.0),
         1.0,
         (mean(1) / mean(2)).clamp(0.5, 4.0),
     ];
 
-    // White point: the 99th percentile of the balanced brightest channel.
+    // White point: the 99th percentile of the balanced brightest channel. Values
+    // are 10-bit, so per-channel tables replace the arithmetic for each quad.
+    let balanced: [Vec<u16>; 3] =
+        std::array::from_fn(|c| (0..1024).map(|value| (value as f32 * gains[c]) as u16).collect());
     let mut histogram = vec![0u32; 4096];
     for quad in &quads {
-        let peak = (0..3).map(|c| quad[c] as f32 * gains[c]).fold(0.0, f32::max);
-        histogram[(peak as usize).min(4095)] += 1;
+        let peak = (0..3).map(|c| balanced[c][usize::from(quad[c] & 0x3FF)]).max().unwrap_or(0);
+        histogram[usize::from(peak).min(4095)] += 1;
     }
     let wanted = quads.len() as u32 / 100;
     let mut seen = 0;
@@ -162,28 +209,44 @@ pub fn develop(raw: &[u8], stride: usize, width: usize, height: usize, rotation:
         let scaled = (value as f32 * gains[c] / white * 1024.0) as usize;
         lut[scaled.min(1024)]
     };
+    let tones: [Vec<u8>; 3] = std::array::from_fn(|c| (0..1024).map(|value| tone(value, c)).collect());
 
+    // Output rows in bands, each pixel taken from where the rotation brings it.
     let (out_w, out_h) = match rotation {
         Rotation::None | Rotation::Half => (qw, qh),
         _ => (qh, qw),
     };
     let mut data = vec![0u8; out_w * out_h * 3];
-    for y in 0..qh {
-        for x in 0..qw {
-            let (ox, oy) = match rotation {
-                Rotation::None => (x, y),
-                Rotation::Clockwise90 => (qh - 1 - y, x),
-                Rotation::Half => (qw - 1 - x, qh - 1 - y),
-                Rotation::Clockwise270 => (y, qw - 1 - x),
-            };
-            let quad = quads[y * qw + x];
-            let at = (oy * out_w + ox) * 3;
-            for c in 0..3 {
-                data[at + c] = tone(quad[c], c);
-            }
+    let band = out_h.div_ceil(workers(out_h));
+    let (quads, tones) = (&quads, &tones);
+    std::thread::scope(|scope| {
+        for (index, chunk) in data.chunks_mut(band * out_w * 3).enumerate() {
+            scope.spawn(move || {
+                for (offset, row) in chunk.chunks_mut(out_w * 3).enumerate() {
+                    let oy = index * band + offset;
+                    for (ox, pixel) in row.chunks_exact_mut(3).enumerate() {
+                        let (x, y) = match rotation {
+                            Rotation::None => (ox, oy),
+                            Rotation::Clockwise90 => (oy, qh - 1 - ox),
+                            Rotation::Half => (qw - 1 - ox, qh - 1 - oy),
+                            Rotation::Clockwise270 => (qw - 1 - oy, ox),
+                        };
+                        let quad = quads[y * qw + x];
+                        for c in 0..3 {
+                            pixel[c] = tones[c][usize::from(quad[c] & 0x3FF)];
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
     Rgb { width: out_w, height: out_h, data }
+}
+
+/// How many threads to split `rows` rows of work between: one per core, at
+/// most four (the phone has four).
+fn workers(rows: usize) -> usize {
+    std::thread::available_parallelism().map_or(1, |count| count.get()).clamp(1, 4).min(rows.max(1))
 }
 
 /// Shrinks an image to fit inside `max_width` x `max_height`, keeping its shape,
@@ -330,14 +393,69 @@ fn category(value: i32) -> (u8, u16) {
 
 struct Table {
     quant: [u16; 64],
+    /// What `fast_dct` output is multiplied by to give quantized values.
+    divisors: [f32; 64],
     dc: [(u16, u8); 256],
     ac: [(u16, u8); 256],
 }
 
+impl Table {
+    fn new(base: &[u8; 64], quality: u32, dc_bits: &[u8; 16], ac_bits: &[u8; 16], ac_values: &[u8]) -> Self {
+        let quant = scaled_quant(base, quality);
+        let divisors = std::array::from_fn(|k| 1.0 / (f32::from(quant[k]) * AAN_SCALE[k / 8] * AAN_SCALE[k % 8] * 8.0));
+        Table { quant, divisors, dc: huffman_codes(dc_bits, &DC_VALUES), ac: huffman_codes(ac_bits, ac_values) }
+    }
+}
+
+/// Scale factors the AAN DCT leaves in its outputs, by frequency.
+const AAN_SCALE: [f32; 8] =
+    [1.0, 1.387_039_8, 1.306_563, 1.175_875_6, 1.0, 0.785_694_96, 0.541_196_1, 0.275_899_38];
+
+/// One 8-point pass of the Arai-Agui-Nakajima forward DCT (as in the IJG's
+/// jfdctflt.c), on the values at `at`, `at + step`, ... `at + 7 * step`.
+fn aan_pass(data: &mut [f32; 64], at: usize, step: usize) {
+    let d = |i: usize| data[at + i * step];
+    let (tmp0, tmp7) = (d(0) + d(7), d(0) - d(7));
+    let (tmp1, tmp6) = (d(1) + d(6), d(1) - d(6));
+    let (tmp2, tmp5) = (d(2) + d(5), d(2) - d(5));
+    let (tmp3, tmp4) = (d(3) + d(4), d(3) - d(4));
+
+    let (tmp10, tmp13) = (tmp0 + tmp3, tmp0 - tmp3);
+    let (tmp11, tmp12) = (tmp1 + tmp2, tmp1 - tmp2);
+    let z1 = (tmp12 + tmp13) * 0.707_106_77;
+    let even = [tmp10 + tmp11, tmp13 + z1, tmp10 - tmp11, tmp13 - z1];
+
+    let (tmp10, tmp11, tmp12) = (tmp4 + tmp5, tmp5 + tmp6, tmp6 + tmp7);
+    let z5 = (tmp10 - tmp12) * 0.382_683_43;
+    let z2 = 0.541_196_1 * tmp10 + z5;
+    let z4 = 1.306_563 * tmp12 + z5;
+    let z3 = tmp11 * 0.707_106_77;
+    let (z11, z13) = (tmp7 + z3, tmp7 - z3);
+
+    let out = [even[0], z11 + z4, even[1], z13 - z2, even[2], z13 + z2, even[3], z11 - z4];
+    for (i, value) in out.into_iter().enumerate() {
+        data[at + i * step] = value;
+    }
+}
+
+/// Forward DCT of a level-shifted 8x8 block in place, in natural order, with
+/// each output still scaled by AAN_SCALE[row] * AAN_SCALE[column] * 8.
+fn fast_dct(data: &mut [f32; 64]) {
+    for row in 0..8 {
+        aan_pass(data, row * 8, 1);
+    }
+    for column in 0..8 {
+        aan_pass(data, column, 8);
+    }
+}
+
+/// The plain DCT, to check `fast_dct` against.
+#[cfg(test)]
 struct Dct {
     cos: [[f32; 8]; 8],
 }
 
+#[cfg(test)]
 impl Dct {
     fn new() -> Self {
         let mut cos = [[0.0; 8]; 8];
@@ -368,11 +486,11 @@ impl Dct {
     }
 }
 
-fn encode_block(writer: &mut BitWriter, dct: &Dct, block: &[f32; 64], table: &Table, previous_dc: &mut i32) {
-    let coefficients = dct.forward(block);
+fn encode_block(writer: &mut BitWriter, block: &mut [f32; 64], table: &Table, previous_dc: &mut i32) {
+    fast_dct(block);
     let mut quantized = [0i32; 64];
     for (k, &natural) in ZIGZAG.iter().enumerate() {
-        quantized[k] = (coefficients[natural] / f32::from(table.quant[natural])).round() as i32;
+        quantized[k] = (block[natural] * table.divisors[natural]).round() as i32;
     }
     let diff = quantized[0] - *previous_dc;
     *previous_dc = quantized[0];
@@ -421,16 +539,8 @@ fn huffman_segment(out: &mut Vec<u8>, class_id: u8, bits: &[u8; 16], values: &[u
 /// Encodes an RGB image as a baseline JPEG with 4:2:0 chroma subsampling.
 pub fn encode_jpeg(image: &Rgb, quality: u32) -> Vec<u8> {
     let (width, height) = (image.width, image.height);
-    let luma = Table {
-        quant: scaled_quant(&LUMA_QUANT, quality),
-        dc: huffman_codes(&DC_LUMA_BITS, &DC_VALUES),
-        ac: huffman_codes(&AC_LUMA_BITS, &AC_LUMA_VALUES),
-    };
-    let chroma = Table {
-        quant: scaled_quant(&CHROMA_QUANT, quality),
-        dc: huffman_codes(&DC_CHROMA_BITS, &DC_VALUES),
-        ac: huffman_codes(&AC_CHROMA_BITS, &AC_CHROMA_VALUES),
-    };
+    let luma = Table::new(&LUMA_QUANT, quality, &DC_LUMA_BITS, &AC_LUMA_BITS, &AC_LUMA_VALUES);
+    let chroma = Table::new(&CHROMA_QUANT, quality, &DC_CHROMA_BITS, &AC_CHROMA_BITS, &AC_CHROMA_VALUES);
 
     let mut out = vec![0xFF, 0xD8];
     segment(&mut out, 0xE0, b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00");
@@ -448,51 +558,81 @@ pub fn encode_jpeg(image: &Rgb, quality: u32) -> Vec<u8> {
     huffman_segment(&mut out, 0x10, &AC_LUMA_BITS, &AC_LUMA_VALUES);
     huffman_segment(&mut out, 0x01, &DC_CHROMA_BITS, &DC_VALUES);
     huffman_segment(&mut out, 0x11, &AC_CHROMA_BITS, &AC_CHROMA_VALUES);
+    // A restart marker after each row of macroblocks makes the rows independent,
+    // so several cores can encode them.
+    let mcu_rows = height.div_ceil(16);
+    segment(&mut out, 0xDD, &(width.div_ceil(16) as u16).to_be_bytes());
     segment(&mut out, 0xDA, &[3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0]);
-
-    // Pixel at (x, y) with edges repeated, as Y, Cb, Cr.
-    let ycc = |x: usize, y: usize| -> [f32; 3] {
-        let at = (y.min(height - 1) * width + x.min(width - 1)) * 3;
-        let (r, g, b) = (image.data[at] as f32, image.data[at + 1] as f32, image.data[at + 2] as f32);
-        [
-            0.299 * r + 0.587 * g + 0.114 * b,
-            -0.168_736 * r - 0.331_264 * g + 0.5 * b + 128.0,
-            0.5 * r - 0.418_688 * g - 0.081_312 * b + 128.0,
-        ]
-    };
-
-    let dct = Dct::new();
-    let mut writer = BitWriter { out, buffer: 0, count: 0 };
-    let mut dc = [0i32; 3];
-    let mut block = [0.0f32; 64];
-    for my in (0..height).step_by(16) {
-        for mx in (0..width).step_by(16) {
-            for (by, bx) in [(0, 0), (0, 8), (8, 0), (8, 8)] {
-                for y in 0..8 {
-                    for x in 0..8 {
-                        block[y * 8 + x] = ycc(mx + bx + x, my + by + y)[0] - 128.0;
-                    }
-                }
-                encode_block(&mut writer, &dct, &block, &luma, &mut dc[0]);
-            }
-            for component in 1..3 {
-                for y in 0..8 {
-                    for x in 0..8 {
-                        let mut sum = 0.0;
-                        for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                            sum += ycc(mx + 2 * x + dx, my + 2 * y + dy)[component];
-                        }
-                        block[y * 8 + x] = sum / 4.0 - 128.0;
-                    }
-                }
-                encode_block(&mut writer, &dct, &block, &chroma, &mut dc[component]);
-            }
+    let threads = workers(mcu_rows);
+    let per_thread = mcu_rows.div_ceil(threads);
+    let (luma, chroma) = (&luma, &chroma);
+    let rows: Vec<Vec<u8>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..mcu_rows)
+            .step_by(per_thread)
+            .map(|first| {
+                scope.spawn(move || {
+                    (first..(first + per_thread).min(mcu_rows))
+                        .map(|row| encode_mcu_row(image, row, luma, chroma))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|worker| worker.join().expect("JPEG worker panicked")).collect()
+    });
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            out.extend_from_slice(&[0xFF, 0xD0 + ((index - 1) % 8) as u8]);
         }
+        out.extend_from_slice(row);
     }
-    writer.flush();
-    let mut out = writer.out;
     out.extend_from_slice(&[0xFF, 0xD9]);
     out
+}
+
+/// Copies an 8x8 block out of a plane.
+fn load_block(block: &mut [f32; 64], plane: &[f32], plane_width: usize, left: usize, top: usize) {
+    for y in 0..8 {
+        let start = (top + y) * plane_width + left;
+        block[y * 8..y * 8 + 8].copy_from_slice(&plane[start..start + 8]);
+    }
+}
+
+/// Encodes one row of 16x16 macroblocks as an entropy-coded segment: level
+/// shifted Y, Cb and Cr with edges repeated, and Cb and Cr averaged over each
+/// 2x2 pixels.
+fn encode_mcu_row(image: &Rgb, mcu_row: usize, luma: &Table, chroma: &Table) -> Vec<u8> {
+    let (width, height) = (image.width, image.height);
+    let padded_w = width.div_ceil(16) * 16;
+    let chroma_w = padded_w / 2;
+    let mut y_plane = vec![0.0f32; padded_w * 16];
+    let mut cb_plane = vec![0.0f32; chroma_w * 8];
+    let mut cr_plane = vec![0.0f32; chroma_w * 8];
+    for row in 0..16 {
+        let source = (mcu_row * 16 + row).min(height - 1) * width;
+        for x in 0..padded_w {
+            let at = (source + x.min(width - 1)) * 3;
+            let (r, g, b) = (f32::from(image.data[at]), f32::from(image.data[at + 1]), f32::from(image.data[at + 2]));
+            y_plane[row * padded_w + x] = 0.299 * r + 0.587 * g + 0.114 * b - 128.0;
+            let c = (row / 2) * chroma_w + x / 2;
+            cb_plane[c] += (-0.168_736 * r - 0.331_264 * g + 0.5 * b) / 4.0;
+            cr_plane[c] += (0.5 * r - 0.418_688 * g - 0.081_312 * b) / 4.0;
+        }
+    }
+    let mut writer = BitWriter { out: Vec::with_capacity(padded_w * 8), buffer: 0, count: 0 };
+    let mut dc = [0i32; 3];
+    let mut block = [0.0f32; 64];
+    for mx in (0..padded_w).step_by(16) {
+        for (by, bx) in [(0, 0), (0, 8), (8, 0), (8, 8)] {
+            load_block(&mut block, &y_plane, padded_w, mx + bx, by);
+            encode_block(&mut writer, &mut block, luma, &mut dc[0]);
+        }
+        load_block(&mut block, &cb_plane, chroma_w, mx / 2, 0);
+        encode_block(&mut writer, &mut block, chroma, &mut dc[1]);
+        load_block(&mut block, &cr_plane, chroma_w, mx / 2, 0);
+        encode_block(&mut writer, &mut block, chroma, &mut dc[2]);
+    }
+    writer.flush();
+    writer.out
 }
 
 #[cfg(test)]
@@ -565,14 +705,30 @@ mod tests {
         let jpeg = encode_jpeg(&image, 85);
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9]);
-        // Every 0xFF in the entropy data is stuffed or is a marker we wrote.
+        // A restart interval of one macroblock row: 37 pixels are 3 macroblocks.
+        let dri = jpeg.windows(2).position(|w| w == [0xFF, 0xDD]).unwrap();
+        assert_eq!(&jpeg[dri + 2..dri + 6], &[0, 4, 0, 3]);
+        // Every 0xFF in the entropy data is stuffed or a restart marker, and the
+        // markers count up: 21 lines are 2 rows, so one marker.
         let sos = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
         let data = &jpeg[sos + 14..jpeg.len() - 2];
+        let mut restarts = Vec::new();
         for (i, &byte) in data.iter().enumerate() {
             if byte == 0xFF {
-                assert_eq!(data.get(i + 1), Some(&0));
+                match data.get(i + 1) {
+                    Some(0) => {}
+                    Some(&marker) => restarts.push(marker),
+                    None => panic!("0xFF at the end"),
+                }
             }
         }
+        assert_eq!(restarts, [0xD0]);
+        // Taller images cycle through all eight markers.
+        let tall = Rgb { width: 16, height: 16 * 10, data: vec![128; 16 * 160 * 3] };
+        let jpeg = encode_jpeg(&tall, 85);
+        let markers: Vec<u8> =
+            jpeg.windows(2).filter(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1])).map(|w| w[1]).collect();
+        assert_eq!(markers, [0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD0]);
     }
 
     /// With A32_TEST_JPEG=PATH set, writes a color test chart there, so that an
@@ -609,6 +765,65 @@ mod tests {
         let turned = develop(&raw, 5, 4, 2, Rotation::Clockwise90);
         assert_eq!((turned.width, turned.height), (1, 2));
         assert!(turned.data[0] < turned.data[3]); // left quad is now on top
+    }
+
+    /// Pseudo-random numbers, the same on every run.
+    fn noise(count: usize, seed: u32, max: u32) -> Vec<u32> {
+        let mut state = seed;
+        (0..count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % (max + 1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fast_dct_matches_the_plain_one() {
+        let dct = Dct::new();
+        for seed in 1..20 {
+            let values = noise(64, seed, 255);
+            let block: [f32; 64] = std::array::from_fn(|i| values[i] as f32 - 128.0);
+            let plain = dct.forward(&block);
+            let mut fast = block;
+            fast_dct(&mut fast);
+            for k in 0..64 {
+                let scaled = fast[k] / (AAN_SCALE[k / 8] * AAN_SCALE[k % 8] * 8.0);
+                assert!((scaled - plain[k]).abs() < 0.01, "seed {seed} k {k}: {scaled} vs {}", plain[k]);
+            }
+        }
+    }
+
+    #[test]
+    fn unpacks_whole_groups_and_the_rest() {
+        for width in [1, 3, 4, 7, 8, 13, 64] {
+            let values: Vec<u16> = noise(width, width as u32, 1023).into_iter().map(|v| v as u16).collect();
+            // Lines are padded to whole bytes; pack_lsb only writes whole bytes.
+            let mut padded = values.clone();
+            padded.resize(width.div_ceil(4) * 4, 0);
+            let mut out = Vec::new();
+            unpack_line(&pack_lsb(&padded), width, &mut out);
+            assert_eq!(out, values, "width {width}");
+        }
+        // A short line gives what it holds.
+        let mut out = Vec::new();
+        unpack_line(&pack_lsb(&[1, 2, 3, 4]), 8, &mut out);
+        assert_eq!(out, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn scaled_develop_skips_quads() {
+        // 8x4 raw: quads (0,0) dark, (1,0) bright, (2,0) dark, (3,0) bright; the
+        // second quad row is skipped at step 2.
+        let row = pack_lsb(&[100, 100, 900, 900, 100, 100, 900, 900]);
+        let skipped = pack_lsb(&[1023; 8]);
+        let raw = [row.clone(), row, skipped.clone(), skipped].concat();
+        let image = develop_scaled(&raw, 10, 8, 4, Rotation::None, 2);
+        assert_eq!((image.width, image.height), (2, 1));
+        // Both kept quads are the dark ones (x = 0 and x = 4), so they match.
+        assert_eq!(image.data[0..3], image.data[3..6]);
+        let full = develop_scaled(&raw, 10, 8, 4, Rotation::None, 1);
+        assert_eq!((full.width, full.height), (4, 2));
     }
 
     #[test]

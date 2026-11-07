@@ -1,7 +1,9 @@
 //! A read-only status page for the local network: what the panel's home page shows,
-//! the end of the persistent log, and photos from the cameras. It takes no input
-//! beyond the path and changes nothing, so it has no login: anyone who can reach it
-//! can take a photo. The firewall only lets private addresses reach it.
+//! the end of the persistent log, and photos and live video from the cameras. The
+//! status needs no login; the cameras need the web password (HTTP Basic, any user
+//! name) and stay off until one is set on the console. Plain HTTP sends the
+//! password readably, so this keeps out other people on the network only if they
+//! do not watch its traffic. The firewall only lets private addresses reach it.
 //! Everything here is text in and bytes out, so it runs on the host in unit tests.
 
 use crate::bluetooth::{address_text, Device};
@@ -27,6 +29,8 @@ pub enum Route {
     Bluetooth,
     /// A new photo from the named camera, "rear" or "front".
     Photo(&'static str),
+    /// Live video from the named camera, as MJPEG.
+    Live(&'static str),
     NotFound,
     MethodNotAllowed,
     BadRequest,
@@ -52,6 +56,8 @@ pub fn route(request: &str) -> Route {
         "/bluetooth.json" => Route::Bluetooth,
         "/camera/rear.jpg" => Route::Photo("rear"),
         "/camera/front.jpg" => Route::Photo("front"),
+        "/camera/rear.mjpg" => Route::Live("rear"),
+        "/camera/front.mjpg" => Route::Live("front"),
         _ => Route::NotFound,
     }
 }
@@ -200,7 +206,7 @@ pre {{ margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6
 <body>
 <main>
 <h1>Amazing A32</h1>
-<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a> · photo: <a href=\"/camera/rear.jpg\">rear</a>, <a href=\"/camera/front.jpg\">front</a></p>
+<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a> · photo: <a href=\"/camera/rear.jpg\">rear</a>, <a href=\"/camera/front.jpg\">front</a> · live: <a href=\"/camera/rear.mjpg\">rear</a>, <a href=\"/camera/front.mjpg\">front</a></p>
 <table>
 {table}</table>
 {sensor_section}<h2>Log, newest last</h2>
@@ -238,6 +244,96 @@ pub fn response_bytes(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> 
     reply
 }
 
+/// The start of an MJPEG reply: each frame follows as one `live_part`.
+pub fn live_header() -> &'static [u8] {
+    b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+}
+
+/// One frame of an MJPEG reply.
+pub fn live_part(jpeg: &[u8]) -> Vec<u8> {
+    let mut part = format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg.len()).into_bytes();
+    part.extend_from_slice(jpeg);
+    part.extend_from_slice(b"\r\n");
+    part
+}
+
+/// The reply that asks a browser for the camera password.
+pub fn unauthorized() -> Vec<u8> {
+    let body = "the cameras need the web password\n";
+    format!(
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"A32 cameras\", charset=\"UTF-8\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// Shortest and longest password `password_problem` accepts.
+pub const PASSWORD_MIN: usize = 10;
+pub const PASSWORD_MAX: usize = 64;
+
+/// Why `password` cannot be the web password, or `None` if it can: it must be
+/// printable ASCII without spaces (so it can be typed on the console and sent in
+/// a header) and from `PASSWORD_MIN` to `PASSWORD_MAX` characters.
+pub fn password_problem(password: &str) -> Option<String> {
+    if !(PASSWORD_MIN..=PASSWORD_MAX).contains(&password.len()) {
+        return Some(format!("use {PASSWORD_MIN} to {PASSWORD_MAX} characters"));
+    }
+    if !password.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Some("use printable ASCII characters without spaces".to_string());
+    }
+    None
+}
+
+/// Whether the request's Basic credentials carry `password`, whatever the user
+/// name. The comparison takes the same time wherever the first difference is.
+pub fn authorized(request: &str, password: &str) -> bool {
+    let Some(given) = basic_password(request) else { return false };
+    let (given, expected) = (given.as_bytes(), password.as_bytes());
+    let mut difference = given.len() ^ expected.len();
+    for (index, &byte) in expected.iter().enumerate() {
+        difference |= usize::from(byte ^ given.get(index).copied().unwrap_or(0));
+    }
+    difference == 0 && !expected.is_empty()
+}
+
+/// The password from an `Authorization: Basic` header.
+fn basic_password(request: &str) -> Option<String> {
+    let value = request.lines().skip(1).take_while(|line| !line.is_empty()).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("authorization").then_some(value.trim())
+    })?;
+    let (scheme, encoded) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = String::from_utf8(base64_decode(encoded.trim())?).ok()?;
+    decoded.split_once(':').map(|(_, password)| password.to_string())
+}
+
+/// Standard base64 with padding, as browsers send it.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim_end_matches('=');
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut bits, mut count) = (0u32, 0);
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// The last `count` lines of `text`.
 pub fn last_lines(text: &str, count: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -265,6 +361,8 @@ mod tests {
         assert_eq!(route("GET /camera/rear.jpg HTTP/1.1\r\n\r\n"), Route::Photo("rear"));
         assert_eq!(route("GET /camera/front.jpg?t=1 HTTP/1.1\r\n\r\n"), Route::Photo("front"));
         assert_eq!(route("GET /camera/side.jpg HTTP/1.1\r\n\r\n"), Route::NotFound);
+        assert_eq!(route("GET /camera/rear.mjpg HTTP/1.1\r\n\r\n"), Route::Live("rear"));
+        assert_eq!(route("GET /camera/front.mjpg HTTP/1.1\r\n\r\n"), Route::Live("front"));
         assert_eq!(route("GET /etc/passwd HTTP/1.1\r\n\r\n"), Route::NotFound);
         assert_eq!(route("GET /../ HTTP/1.1\r\n\r\n"), Route::NotFound);
         assert_eq!(route("POST / HTTP/1.1\r\n\r\n"), Route::MethodNotAllowed);
@@ -339,6 +437,44 @@ mod tests {
         assert!(html.contains("<td>Room &quot;A&quot; 11:22:33:44:55:66</td><td>-5.20 C, 45.60%, battery 93%, 5 s ago</td>"));
         assert_eq!(bluetooth_json("off", &[], Duration::ZERO), "{\"state\":\"off\",\"devices\":[]}\n");
         assert_eq!(route("GET /bluetooth.json HTTP/1.1\r\n\r\n"), Route::Bluetooth);
+    }
+
+    #[test]
+    fn checks_the_basic_password() {
+        // "viewer:correct horse" and ":correct horse" (no user name).
+        let with_user = "GET /camera/rear.jpg HTTP/1.1\r\nHost: x\r\nAuthorization: Basic dmlld2VyOmNvcnJlY3QgaG9yc2U=\r\n\r\n";
+        let no_user = "GET / HTTP/1.1\r\nauthorization:  basic OmNvcnJlY3QgaG9yc2U=\r\n\r\n";
+        assert!(authorized(with_user, "correct horse"));
+        assert!(authorized(no_user, "correct horse"));
+        assert!(!authorized(with_user, "correct horsf"));
+        assert!(!authorized(with_user, "correct hors"));
+        assert!(!authorized(with_user, "correct horse!"));
+        assert!(!authorized(with_user, ""));
+        assert!(!authorized("GET / HTTP/1.1\r\n\r\n", "correct horse"));
+        assert!(!authorized("GET / HTTP/1.1\r\nAuthorization: Bearer abc\r\n\r\n", "correct horse"));
+        assert!(!authorized("GET / HTTP/1.1\r\nAuthorization: Basic %%%\r\n\r\n", "correct horse"));
+        // A header after the blank line is body, not a header.
+        assert!(!authorized("GET / HTTP/1.1\r\n\r\nAuthorization: Basic OmNvcnJlY3QgaG9yc2U=\r\n", "correct horse"));
+        assert_eq!(base64_decode("YQ==").unwrap(), b"a");
+        assert_eq!(base64_decode("YWI=").unwrap(), b"ab");
+        assert_eq!(base64_decode("YWJj").unwrap(), b"abc");
+        let reply = String::from_utf8(unauthorized()).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="));
+    }
+
+    #[test]
+    fn password_rules() {
+        assert_eq!(password_problem("Tr0ub4dor&3x"), None);
+        assert!(password_problem("short").is_some());
+        assert!(password_problem("has a space in it").is_some());
+        assert!(password_problem("non-ascii-p\u{e4}ssword").is_some());
+        assert!(password_problem(&"x".repeat(65)).is_some());
+    }
+
+    #[test]
+    fn frames_live_video() {
+        assert!(String::from_utf8_lossy(live_header()).contains("multipart/x-mixed-replace; boundary=frame\r\n"));
+        assert_eq!(live_part(b"JPG"), b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nJPG\r\n");
     }
 
     #[test]

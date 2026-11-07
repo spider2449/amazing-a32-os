@@ -37,6 +37,9 @@ const HELP: &str = "commands:
   bench net PORT [SECONDS]     measure a TCP client, one connection
   bench load SECONDS           load all CPUs and record temperatures
   camera rear|front NEW_FILE    take a photo and save it as a JPEG
+  web password                 say whether the web cameras have a password
+  web password NEW|off         set the password for the web cameras (10 to 64
+                               printable characters, no spaces), or turn them off
   poweroff[SECONDS]           turn the phone off, optionally after a delay
 ";
 
@@ -72,6 +75,9 @@ pub trait Platform {
     /// Takes a photo with the rear or front camera, saves it as a JPEG and
     /// describes it.
     fn photo(&self, camera: &str, path: &str) -> io::Result<String>;
+    /// Sets the web password for the cameras, removes it with `Some("off")`, or
+    /// with `None` says whether one is set. Never shows the password.
+    fn web_password(&self, password: Option<&str>) -> io::Result<String>;
 }
 
 /// Serves commands until the input ends.
@@ -145,6 +151,10 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         }
         ["camera", camera @ ("rear" | "front"), path] => {
             platform.photo(camera, path).and_then(|text| writeln!(out, "{text}"))
+        }
+        ["web", "password"] => platform.web_password(None).and_then(|text| writeln!(out, "{text}")),
+        ["web", "password", password] => {
+            platform.web_password(Some(password)).and_then(|text| writeln!(out, "{text}"))
         }
         ["tcp", address] => try_tcp(address, out),
         ["ui", "tap", x, y] => match (x.parse(), y.parse()) {
@@ -272,6 +282,10 @@ mod tests {
         fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
             Ok(format!("photo {camera} {path}"))
         }
+
+        fn web_password(&self, password: Option<&str>) -> io::Result<String> {
+            Ok(format!("web password {password:?}"))
+        }
     }
 
     fn session(input: &str) -> (String, Vec<Option<String>>) {
@@ -333,6 +347,14 @@ mod tests {
         assert!(session("bluetooth add 58:2d:34:36:74:93\n").0.contains("sensor add=true 58:2d:34:36:74:93"));
         assert!(session("bluetooth remove 58:2d:34:36:74:93\n").0.contains("sensor add=false 58:2d:34:36:74:93"));
         assert!(session("bluetooth add\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn web_password_takes_one_word() {
+        assert!(session("web password\n").0.contains("web password None"));
+        assert!(session("web password s3cret-value\n").0.contains("web password Some(\"s3cret-value\")"));
+        assert!(session("web password off\n").0.contains("web password Some(\"off\")"));
+        assert!(session("web password two words\n").0.contains("unknown command"));
     }
 
     #[test]
