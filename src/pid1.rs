@@ -78,6 +78,7 @@ extern "C" {
         data: *const c_void,
     ) -> c_int;
     fn mknod(path: *const c_char, mode: c_uint, dev: u64) -> c_int;
+    fn swapon(path: *const c_char, flags: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn klogctl(kind: c_int, buffer: *mut c_char, length: c_int) -> c_int;
     fn sync();
@@ -128,6 +129,9 @@ const SERIAL_WAIT_SECONDS: u32 = 30;
 // Must exceed SERIAL_WAIT_SECONDS, so that this only catches a stuck setup.
 const CONSOLE_DEADLINE: Duration = Duration::from_secs(60);
 const SYS_INPUT: &str = "/sys/class/input";
+const ZRAM_SYS: &str = "/sys/block/zram0";
+const ZRAM_DEVICE: &str = "/dev/zram0";
+const MEMINFO: &str = "/proc/meminfo";
 // The kernel's keypad device, which reports the power and volume keys.
 const KEYPAD_NAME: &str = "mtk-kpd";
 const KEYPAD_DEVICE: &str = "/dev/keypad";
@@ -727,7 +731,7 @@ pub fn run() -> ! {
         }
     }));
 
-    // Failures are collected because `/dev/kmsg` does not exist until the
+    // Messages and failures are collected because `/dev/kmsg` does not exist until the
     // device nodes below have been created.
     let mut errors = Vec::new();
     for &(fstype, target) in MOUNTS {
@@ -755,6 +759,10 @@ pub fn run() -> ! {
     }
     if let Err(err) = mount_system() {
         errors.push(format!("mount /system failed: {err}"));
+    }
+    match start_zram_swap() {
+        Ok(size) => errors.push(format!("zram swap: {} MiB", size >> 20)),
+        Err(err) => errors.push(format!("zram swap failed: {err}")),
     }
     if let Err(err) = prepare_etc() {
         errors.push(format!("/etc failed: {err}"));
@@ -793,6 +801,9 @@ pub fn run() -> ! {
     }
     if let Err(err) = thread::Builder::new().spawn(alpine::ssh_service) {
         log(&format!("ssh thread failed: {err}"));
+    }
+    if let Err(err) = thread::Builder::new().spawn(alpine::mdns_service) {
+        log(&format!("mdns thread failed: {err}"));
     }
     if let Err(err) = thread::Builder::new().spawn(thermal_service) {
         log(&format!("thermal thread failed: {err}"));
@@ -3171,6 +3182,30 @@ fn make_partition_devices() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Makes half of RAM a compressed swap device. Errors are returned because the
+/// log does not exist yet when this runs.
+fn start_zram_swap() -> io::Result<u64> {
+    let size = crate::swap::device_size(&fs::read_to_string(MEMINFO)?)
+        .ok_or_else(|| io::Error::other("no MemTotal in /proc/meminfo"))?;
+    let dev = fs::read_to_string(format!("{ZRAM_SYS}/dev"))?;
+    let (major, minor) =
+        usb::parse_dev(&dev).ok_or_else(|| io::Error::other(format!("bad device number: {dev}")))?;
+    make_device(ZRAM_DEVICE, S_IFBLK | 0o600, major, minor)?;
+    // The size can only be set once, until the device is reset.
+    fs::write(format!("{ZRAM_SYS}/disksize"), size.to_string())?;
+    let header = crate::swap::header(size).ok_or_else(|| io::Error::other("zram device too small"))?;
+    let mut device = OpenOptions::new().write(true).open(ZRAM_DEVICE)?;
+    device.write_all(&header)?;
+    device.sync_all()?;
+    drop(device);
+    let path = cstring(ZRAM_DEVICE)?;
+    // SAFETY: `path` is a valid NUL-terminated string for the call duration.
+    if unsafe { swapon(path.as_ptr(), crate::swap::swapon_flags(crate::swap::PRIORITY)) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(size)
 }
 
 pub(crate) fn make_char_device(path: &str, major: u32, minor: u32, perm: c_uint) -> io::Result<()> {

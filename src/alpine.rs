@@ -31,7 +31,14 @@ const SSHD: &str = "/usr/sbin/sshd";
 const ROOT_SSHD: &str = "/data/alpine/usr/sbin/sshd";
 const ROOT_HOST_KEY: &str = "/data/alpine/etc/ssh/ssh_host_ed25519_key";
 const SSHD_LOG: &str = "/run/sshd.log";
-const SSHD_CHECK: Duration = Duration::from_secs(5);
+const SERVICE_CHECK: Duration = Duration::from_secs(5);
+
+const AVAHI: &str = "/usr/sbin/avahi-daemon";
+const ROOT_AVAHI: &str = "/data/alpine/usr/sbin/avahi-daemon";
+const AVAHI_USER: &str = "avahi";
+const ROOT_GROUP: &str = "/data/alpine/etc/group";
+const AVAHI_LOG: &str = "/run/avahi.log";
+const MDNS_PORT: &str = "5353";
 
 const IPTABLES: &str = "/system/bin/iptables";
 const IP6TABLES: &str = "/system/bin/ip6tables";
@@ -86,6 +93,11 @@ pub fn apply_firewall() -> io::Result<()> {
         for source in LOCAL_SOURCES {
             rules.push(vec!["-A", "INPUT", "-p", "tcp", "--dport", port, "-s", source, "-j", "ACCEPT"]);
         }
+    }
+    // mDNS queries for a32.local. They go to a multicast address, so they never look
+    // like replies to the phone.
+    for source in LOCAL_SOURCES {
+        rules.push(vec!["-A", "INPUT", "-p", "udp", "--dport", MDNS_PORT, "-s", source, "-j", "ACCEPT"]);
     }
     for rule in &rules {
         table_command(IPTABLES, rule)?;
@@ -269,33 +281,54 @@ pub fn ssh_running() -> bool {
 
 /// Keeps `sshd` running once Alpine has it, so that installing needs no restart.
 pub fn ssh_service() {
+    keep_running(
+        "ssh: sshd",
+        SSHD_LOG,
+        || Path::new(ROOT_SSHD).exists() && Path::new(ROOT_HOST_KEY).exists(),
+        start_sshd,
+        |running| SSH_RUNNING.store(running, Ordering::Release),
+    );
+}
+
+/// Keeps `avahi-daemon` running once Alpine has it, so that `a32.local` finds the
+/// phone at whatever address DHCP gave it.
+pub fn mdns_service() {
+    keep_running("mdns: avahi-daemon", AVAHI_LOG, || Path::new(ROOT_AVAHI).exists(), start_avahi, |_| {});
+}
+
+/// Starts a program once the firewall is ready and `installed` says Alpine has it,
+/// and starts it again whenever it ends.
+fn keep_running(
+    name: &str,
+    log_path: &str,
+    installed: impl Fn() -> bool,
+    start: impl Fn() -> io::Result<u32>,
+    set_running: impl Fn(bool),
+) {
     let mut reported = false;
     loop {
-        let ready = FIREWALL_READY.load(Ordering::Acquire)
-            && Path::new(ROOT_SSHD).exists()
-            && Path::new(ROOT_HOST_KEY).exists();
-        if ready {
-            match start_sshd() {
+        if FIREWALL_READY.load(Ordering::Acquire) && installed() {
+            match start() {
                 Ok(process) => {
-                    log(&format!("ssh: sshd started as {process}"));
-                    SSH_RUNNING.store(true, Ordering::Release);
+                    log(&format!("{name} started as {process}"));
+                    set_running(true);
                     // `reap_forever` collects it, so its entry in /proc shows it ended.
                     let entry = format!("/proc/{process}");
                     while Path::new(&entry).exists() {
-                        thread::sleep(SSHD_CHECK);
+                        thread::sleep(SERVICE_CHECK);
                     }
-                    SSH_RUNNING.store(false, Ordering::Release);
-                    log(&format!("ssh: sshd ended, see {SSHD_LOG}"));
+                    set_running(false);
+                    log(&format!("{name} ended, see {log_path}"));
                     reported = false;
                 }
                 Err(err) if !reported => {
-                    log(&format!("ssh: {err}"));
+                    log(&format!("{name}: {err}"));
                     reported = true;
                 }
                 Err(_) => {}
             }
         }
-        thread::sleep(SSHD_CHECK);
+        thread::sleep(SERVICE_CHECK);
     }
 }
 
@@ -321,6 +354,17 @@ pub fn spawn(program: &str, arguments: &[&str], environment: &[(&str, &str)], lo
         .stderr(log_file)
         .spawn()?;
     Ok(child.id())
+}
+
+fn start_avahi() -> io::Result<u32> {
+    let group = fs::read_to_string(ROOT_GROUP)?;
+    if let Some(updated) = crate::mdns::with_network_member(&group, AVAHI_USER) {
+        fs::write(ROOT_GROUP, updated)?;
+        log("mdns: added avahi to the network group");
+    }
+    fs::write(crate::mdns::CONFIG_PATH, crate::mdns::CONFIG)?;
+    // In the foreground, so that the process to watch is the daemon itself.
+    spawn(AVAHI, &["-f", crate::mdns::CONFIG_PATH], &[], AVAHI_LOG)
 }
 
 fn start_sshd() -> io::Result<u32> {

@@ -151,13 +151,53 @@ Known limits:
   and `/system`, and `df /` shows no size. Run `sh df -h /data` on the console instead.
 - `reboot` inside Alpine asks PID 1, which does not listen. `reboot -f` should work, but
   this has not been tried.
-- OpenRC services do not run. Only `sshd` is started.
+- OpenRC services do not run. Only `sshd` and `avahi-daemon` are started.
+
+### Finding the phone by name (mDNS)
+
+```sh
+apk add avahi tmux
+```
+
+Once `avahi-daemon` is installed, the init starts it like `sshd`, and restarts it if it
+ends. It then answers for `a32.local` at whatever address DHCP gave the phone, so
+`ssh root@a32.local` works without `find-phone.ps1`. The init writes the configuration to
+`/run/avahi-daemon.conf` and passes it with `-f`: D-Bus does not run here, so it turns
+D-Bus off, and IPv6 too, since the firewall drops it. Alpine's own SSH service files are
+still published. Two things it needed:
+
+- The Android kernel lets only group 3003 open network sockets. avahi drops root, and
+  then failed with `socket() failed: Permission denied`. The init adds the `avahi` user
+  to that group in Alpine's `/etc/group` (as `inet`, unless a group has that id).
+- The firewall lets in UDP port 5353 from private addresses, because queries go to a
+  multicast address and so never look like replies.
+
+`nss-mdns` does not exist for musl, so programs on the phone cannot look up other
+`.local` names; that was not needed. On Windows, `ping a32.local`, .NET and `ssh`
+found the phone, but `Resolve-DnsName` asks only DNS servers and says the name does
+not exist.
+
+Tested on a RAM boot: the init started avahi 15 s after the kernel, together with sshd.
+After clearing the Windows DNS cache, `ssh root@a32.local` logged in. Killed, it
+started again 5 s later and answered again.
+
+### Swap in RAM (zram)
+
+There is no swap partition, so the init makes half of RAM (435 MiB) a zram device,
+compressed with lzo, and turns it on as swap before anything else starts. It writes
+the swap header itself, which matches what busybox `mkswap` wrote, so swap does not
+depend on Alpine. The log shows `zram swap: 435 MiB`.
+
+Tested on a RAM boot: one Python process filled 840 MiB of the 870 MB of RAM. It was
+not killed. 65 MB went to swap, and zram used at most 3.1 MB of RAM for it. That
+memory was repeated text, which compresses far better than real program memory, so
+this shows swap works, not how much it holds.
 
 ## Firewall
 
 The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic
-is dropped, except replies to connections from the phone, ping, DHCP replies, and SSH and the
-status page from private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). All
+is dropped, except replies to connections from the phone, ping, DHCP replies, and SSH, the
+status page and mDNS from private addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). All
 incoming IPv6 is dropped. Neither `sshd` nor the status page starts unless all rules were
 applied. `recv` and `bench net` open
 their port only while they run. The `conntrack` match is missing here, but `state` works.
