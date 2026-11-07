@@ -546,7 +546,7 @@ shell. Output does not keep the screen on. Nothing typed is logged. Anyone holdi
 the phone can run commands as root, as the USB serial console already allows.
 Checked on a RAM boot with `ui tap`, `ui drag` and screenshots: `ls /`, `dmesg`
 scrolled back 16 lines by a drag, the keyboard hidden, the up arrow bringing back
-`dmesg`, and CTRL then `c` cancelling it.
+`dmesg`, and CTRL then `c` cancelling it. After flashing, the page ran `ls` in a new shell.
 
 The list shows the 8 strongest WPA2 personal networks, with no way to scroll. Open and
 enterprise networks are not listed, because this system cannot join them. Text is ASCII, so
