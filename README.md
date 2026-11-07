@@ -956,4 +956,5 @@ Tested from a RAM boot: rear photo 1.6-1.8 s, front 0.8 s; photos 47-690 KB. The
 image then booted from flash, joined Wi-Fi and served a front photo in about 1 s.
 A live frame of a person in a room shows the front orientation is upright. The user
 saw the front image mirrored on the panel, so the front camera now also flips it left
-to right (`Rotation::Clockwise270Mirrored`); the other rotations are unchanged.
+to right (`Rotation::Clockwise270Mirrored`); the other rotations are unchanged. After
+flashing, the user confirmed the front image is no longer mirrored.
