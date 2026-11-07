@@ -944,7 +944,8 @@ unreachable from the PC and a Raspberry Pi for 3 min 55 s with neither change, a
 4 min 23 s with both, in RAM boots. During that time the router and the CHT access
 point reached it, the TP-Link and hosts behind it did not, and ARP to those hosts
 still resolved. It ended by itself. The cause was not found. After restarting the CHT
-access point, the phone rejoined in 55 s with the same address.
+access point, the phone rejoined in 55 s with the same address. Then flashed: the phone
+booted from it, joined the network at 28.8 s and announced its address at 33.7 s.
 
 The `sh LINE` console command runs a line with the stock shell.
 
