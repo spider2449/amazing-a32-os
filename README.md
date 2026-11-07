@@ -545,8 +545,9 @@ into the console's shell with `TIOCSTI` and taking screenshots: BusyBox `vi` ope
 shell's screen as before; `less` showed `(END)` in reverse video and scrolled back 5
 lines; `top` drew its header bar in reverse video. BusyBox's `vi`, `less` and `top`
 only move the cursor, erase lines and set reverse video, so the other sequences are
-tested only by unit tests so far. Programs made for 80 columns, such as `htop`, will
-be cramped at 39. Dragging the text with a finger scrolls back through the last 3000 lines,
+tested only by unit tests so far. After flashing, `htop` 3.5.3 (ncurses) drew its
+meters, its reverse-video header and selection bar, and its process list; at 39
+columns it shows only the first columns of the list. Dragging the text with a finger scrolls back through the last 3000 lines,
 and the header says how far; typing returns to the end. The keyboard has five rows
 52 px high: CTRL (for the next key, so CTRL then `c` is Ctrl-C), ESC, TAB and the
 arrows; three rows of keys; and 123, SPACE and ENTER. HIDE KEYS shows 44 lines
