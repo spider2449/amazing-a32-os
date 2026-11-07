@@ -632,7 +632,8 @@ saved at once, and a step past the end of a range saved nothing. At 15 s the bac
 read 0 after 20 s and a touch brought it back at 50% (`128`). With touch waking off, a
 tap left it at 0. After a restart the init read the file 0.01 s after `/data` mounted
 and set the backlight to 128, and a file changed by hand to 5 min with touch waking on
-showed on the page as it was. Not flashed yet.
+showed on the page as it was. Then flashed: the phone booted from it, joined the network at
+28.8 s, and a change on the page was saved; the file was left at the defaults.
 
 ## Desktop
 
