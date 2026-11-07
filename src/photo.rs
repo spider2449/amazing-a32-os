@@ -112,6 +112,9 @@ pub enum Rotation {
     Clockwise90,
     Half,
     Clockwise270,
+    /// Clockwise270, then flipped left to right: the front camera, whose image
+    /// came out mirrored without the flip.
+    Clockwise270Mirrored,
 }
 
 /// Develops a raw frame into an RGB image of half its width and height.
@@ -230,6 +233,7 @@ pub fn develop_scaled(raw: &[u8], stride: usize, width: usize, height: usize, ro
                             Rotation::Clockwise90 => (oy, qh - 1 - ox),
                             Rotation::Half => (qw - 1 - ox, qh - 1 - oy),
                             Rotation::Clockwise270 => (qw - 1 - oy, ox),
+                            Rotation::Clockwise270Mirrored => (qw - 1 - oy, qh - 1 - ox),
                         };
                         let quad = quads[y * qw + x];
                         for c in 0..3 {
@@ -774,6 +778,21 @@ mod tests {
         let turned = develop(&raw, 5, 4, 2, Rotation::Clockwise90);
         assert_eq!((turned.width, turned.height), (1, 2));
         assert!(turned.data[0] < turned.data[3]); // left quad is now on top
+    }
+
+    #[test]
+    fn mirrored_rotation_flips_the_turned_image_left_to_right() {
+        // 4x4 raw of four quads, all different.
+        let rows = [[100, 100, 300, 300], [100, 100, 300, 300], [600, 600, 900, 900], [600, 600, 900, 900]];
+        let raw: Vec<u8> = rows.iter().flat_map(|row| pack_lsb(row)).collect();
+        let turned = develop(&raw, 5, 4, 4, Rotation::Clockwise270);
+        let mirrored = develop(&raw, 5, 4, 4, Rotation::Clockwise270Mirrored);
+        assert_eq!((mirrored.width, mirrored.height), (turned.width, turned.height));
+        let flip = |image: &Rgb| -> Vec<u8> {
+            image.data.chunks(image.width * 3).flat_map(|row| row.chunks(3).rev().flatten().copied().collect::<Vec<_>>()).collect()
+        };
+        assert_eq!(mirrored.data, flip(&turned));
+        assert_ne!(mirrored.data, turned.data);
     }
 
     /// Pseudo-random numbers, the same on every run.

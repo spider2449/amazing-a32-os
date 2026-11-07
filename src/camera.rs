@@ -137,7 +137,7 @@ pub const FRONT: Camera = Camera {
     lanes: 0,
     regs: camera_regs::FRONT,
     limits: ExposureLimits { max_shutter: 1230, max_gain: 8 * UNIT_GAIN },
-    rotation: Rotation::Clockwise270,
+    rotation: Rotation::Clockwise270Mirrored,
     live_step: 1, // 600x800
 };
 
