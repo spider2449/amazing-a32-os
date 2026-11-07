@@ -556,7 +556,7 @@ to the next key only. 123 shows one layer with every other printable character. 
 Wi-Fi passphrase keyboard has the same rows, without the top row, and its symbol
 layer also holds `,` and `.`. Checked on a RAM boot with `ui tap` and screenshots:
 digits, `,`, `.`, a capital, a symbol, DEL, one-shot SHIFT, and both keyboards
-drawn. HIDE KEYS shows 44 lines instead of 28 and tells the shell the new size. The shell starts when the page first
+drawn. Then flashed: the phone booted from it and the console showed the new keyboard. HIDE KEYS shows 44 lines instead of 28 and tells the shell the new size. The shell starts when the page first
 opens and keeps running when the page or the screen closes, so earlier output stays
 for scrolling back. After `exit` the page says so, and the next key starts a new
 shell. Output does not keep the screen on. Nothing typed is logged. Anyone holding
