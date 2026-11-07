@@ -886,7 +886,9 @@ Measured on the phone over Wi-Fi on 2026-11-07, quality 70: front 13.3 fps (73 K
 frames), rear 14.4 fps (67 KB) for 60 s, with the CPU going from 38 to 47 C. Before
 the speed work it was 3.2 and 3.7 fps: the naive DCT, the per-pixel color
 conversion and the float arithmetic per quad took the time, not the network
-(sending is 1-4 ms per frame). Rear photos went from 1.7 s to 1.4 s.
+(sending is 1-4 ms per frame). Rear photos went from 1.7 s to 1.4 s. This image
+then booted from flash, kept the password and streamed the front camera at 10 fps
+within 30 s of starting.
 
 How it works (`src/camera.rs`), all verified on the phone on 2026-11-07:
 
