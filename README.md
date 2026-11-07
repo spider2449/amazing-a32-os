@@ -33,7 +33,7 @@ find FUSE, ext2 or ext3, which are all available.
 | Watchdogs | The kernel kicks the hardware watchdog every 20 s from its own threads. MediaTek's hang detector, `/dev/RT_Monitor`, only reports. See Watchdog |
 | Sleep states | `freeze`, `mem`, not tried |
 | CPU | ARMv7 mode with NEON, VFPv4, integer divide and SHA-2. At most 1092 MHz |
-| CPU cores | One was online when idle, `cpu0`. How others come online was not checked |
+| CPU cores | Only `cpu0` is online when idle. MediaTek's hotplug (`/proc/hps`, `enabled` 1, `num_base_perf_serv` 1, `up_threshold` 95) brings the others online under load: with 4 busy loops, `/sys/devices/system/cpu/online` read `0-3` within 1 s. `htop` shows the idle ones as `offline` |
 | CPU governor | `interactive`. Also `ondemand`, `userspace`, `powersave`, `performance` |
 | Listening sockets | None on TCP, TCP6 or UDP, measured after Wi-Fi joined a network |
 | Bluetooth | No kernel Bluetooth stack: no `/sys/class/bluetooth` and no `vhci`, so BlueZ cannot run. MediaTek's `/dev/stpbt` takes HCI commands directly. See Bluetooth |
