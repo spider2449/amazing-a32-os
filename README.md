@@ -548,10 +548,15 @@ only move the cursor, erase lines and set reverse video, so the other sequences 
 tested only by unit tests so far. After flashing, `htop` 3.5.3 (ncurses) drew its
 meters, its reverse-video header and selection bar, and its process list; at 39
 columns it shows only the first columns of the list. Dragging the text with a finger scrolls back through the last 3000 lines,
-and the header says how far; typing returns to the end. The keyboard has five rows
-52 px high: CTRL (for the next key, so CTRL then `c` is Ctrl-C), ESC, TAB and the
-arrows; three rows of keys; and 123, SPACE and ENTER. HIDE KEYS shows 44 lines
-instead of 29 and tells the shell the new size. The shell starts when the page first
+and the header says how far; typing returns to the end. The keyboard has six rows
+48 px high, laid out like a phone keyboard: CTRL (for the next key, so CTRL then `c`
+is Ctrl-C), ESC, TAB and the arrows; the digits; three rows of letters, the last
+between SHIFT and DEL; and 123, `,`, SPACE, `.` and ENTER. SHIFT, like CTRL, applies
+to the next key only. 123 shows one layer with every other printable character. The
+Wi-Fi passphrase keyboard has the same rows, without the top row, and its symbol
+layer also holds `,` and `.`. Checked on a RAM boot with `ui tap` and screenshots:
+digits, `,`, `.`, a capital, a symbol, DEL, one-shot SHIFT, and both keyboards
+drawn. HIDE KEYS shows 44 lines instead of 28 and tells the shell the new size. The shell starts when the page first
 opens and keeps running when the page or the screen closes, so earlier output stays
 for scrolling back. After `exit` the page says so, and the next key starts a new
 shell. Output does not keep the screen on. Nothing typed is logged. Anyone holding

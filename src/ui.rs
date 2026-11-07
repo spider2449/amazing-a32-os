@@ -32,7 +32,7 @@ const NETWORK_ROW_TOP: u32 = 106;
 const NETWORK_ROW_STEP: u32 = 80;
 const NETWORK_ROW_HEIGHT: u32 = 62;
 const KEY_TOP: u32 = 440;
-const KEY_HEIGHT: u32 = 80;
+const KEY_HEIGHT: u32 = 64;
 
 const PASSPHRASE_LIMIT: usize = 63;
 const SENSOR_ROWS: usize = 4;
@@ -51,15 +51,18 @@ const TERMINAL_LEFT: u32 = 6;
 const TERMINAL_TOP: u32 = 52;
 const TERMINAL_LINE: u32 = 18;
 const TERMINAL_COLUMNS: usize = ((WIDTH - TERMINAL_LEFT * 2) / (CHAR_WIDTH * TEXT_SMALL)) as usize;
-const TERMINAL_KEY_HEIGHT: u32 = 52;
-const TERMINAL_KEYS_TOP: u32 = HEIGHT - 5 * TERMINAL_KEY_HEIGHT;
+const TERMINAL_KEY_HEIGHT: u32 = 48;
+const TERMINAL_KEYS_TOP: u32 = HEIGHT - 6 * TERMINAL_KEY_HEIGHT;
 const HIDE_KEYS: Rect = Rect { x: 258, y: 2, width: 106, height: 40 };
 const LEAVE_CONSOLE: Rect = Rect { x: 368, y: 2, width: 106, height: 40 };
 
-const LOWER: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
-const UPPER: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
-const SYMBOLS: [&str; 3] = ["1234567890", "!@#$%^&*()", "-_=+;:'"];
-const MORE_SYMBOLS: [&str; 3] = ["[]{}<>/\\|~", ",.?\"`", ""];
+// Laid out like a phone keyboard: digits on top, then three rows of letters, the
+// last between SHIFT and DEL. The symbol layer holds every other printable
+// character; `,` and `.` are also on the console's bottom row, but the passphrase
+// keyboard has no room for them there.
+const LOWER: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+const UPPER: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
+const SYMBOLS: [&str; 4] = ["!@#$%^&*()", "-_=+[]{}`~", ";:'\"<>?", "/\\|,."];
 
 /// Everything the home page shows, already as text.
 #[derive(Default)]
@@ -122,16 +125,14 @@ enum Layer {
     Lower,
     Upper,
     Symbols,
-    MoreSymbols,
 }
 
 impl Layer {
-    fn rows(self) -> [&'static str; 3] {
+    fn rows(self) -> [&'static str; 4] {
         match self {
             Layer::Lower => LOWER,
             Layer::Upper => UPPER,
             Layer::Symbols => SYMBOLS,
-            Layer::MoreSymbols => MORE_SYMBOLS,
         }
     }
 }
@@ -359,6 +360,13 @@ impl Ui {
         Request::TerminalSize { columns: self.terminal.columns(), rows: self.terminal.rows() }
     }
 
+    /// SHIFT applies to one key, as on a phone keyboard.
+    fn release_shift(&mut self) {
+        if self.layer == Layer::Upper {
+            self.layer = Layer::Lower;
+        }
+    }
+
     /// Bytes for the shell; typing also brings the view back to the end.
     fn send(&mut self, bytes: Vec<u8>) -> Option<Request> {
         self.control = false;
@@ -560,11 +568,13 @@ impl Ui {
                 return self.send(vec![0x1B, introducer, letter]);
             }
             Press::Key(character) if self.page == Page::Console => {
+                self.release_shift();
                 let bytes = key_bytes(character, self.control);
                 return self.send(bytes);
             }
             Press::Delete if self.page == Page::Console => return self.send(vec![0x7F]),
             Press::Key(character) => {
+                self.release_shift();
                 if self.typed.len() < PASSPHRASE_LIMIT {
                     self.typed.push(character);
                 }
@@ -577,14 +587,13 @@ impl Ui {
                 self.layer = match self.layer {
                     Layer::Lower => Layer::Upper,
                     Layer::Upper => Layer::Lower,
-                    Layer::Symbols => Layer::MoreSymbols,
-                    Layer::MoreSymbols => Layer::Symbols,
+                    Layer::Symbols => Layer::Symbols,
                 }
             }
             Press::SwitchSymbols => {
                 self.layer = match self.layer {
                     Layer::Lower | Layer::Upper => Layer::Symbols,
-                    Layer::Symbols | Layer::MoreSymbols => Layer::Lower,
+                    Layer::Symbols => Layer::Lower,
                 }
             }
             Press::ToggleShow => self.show_typed = !self.show_typed,
@@ -769,20 +778,29 @@ impl Ui {
             buttons.push(button);
         }
         buttons.extend(self.key_rows(row(1).y, TERMINAL_KEY_HEIGHT));
-        let last = row(4);
-        let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
-        buttons.push(Button::new(split(last, 4, 0), symbols, Press::SwitchSymbols));
-        let space = Rect { width: split(last, 4, 1).width * 2 + BUTTON_GAP, ..split(last, 4, 1) };
-        buttons.push(Button::new(space, "SPACE", Press::Key(' ')));
-        buttons.push(Button::new(split(last, 4, 3), "ENTER", Press::Enter));
+        // The bottom row, as on a phone: 123, comma, a wide space, period, enter.
+        let last = row(5);
+        let symbols = if self.layer == Layer::Symbols { "abc" } else { "123" };
+        let keys = [
+            (72, symbols, Press::SwitchSymbols),
+            (48, ",", Press::Key(',')),
+            (192, "SPACE", Press::Key(' ')),
+            (48, ".", Press::Key('.')),
+            (120, "ENTER", Press::Enter),
+        ];
+        let mut x = 0;
+        for (width, label, press) in keys {
+            buttons.push(Button::new(Rect { x, width, ..last }, label, press));
+            x += width;
+        }
         buttons
     }
 
     fn keyboard_buttons(&self) -> Vec<Button> {
         let mut buttons = self.key_rows(KEY_TOP, KEY_HEIGHT);
-        let y = KEY_TOP + 3 * KEY_HEIGHT;
+        let y = KEY_TOP + 4 * KEY_HEIGHT;
         let row = Rect { x: 0, y, width: WIDTH, height: KEY_HEIGHT };
-        let symbols = if matches!(self.layer, Layer::Lower | Layer::Upper) { "123" } else { "abc" };
+        let symbols = if self.layer == Layer::Symbols { "abc" } else { "123" };
         buttons.push(Button::new(split(row, 4, 0), symbols, Press::SwitchSymbols));
         buttons.push(Button::new(split(row, 4, 1), "SPACE", Press::Key(' ')));
         buttons.push(Button::new(
@@ -799,27 +817,29 @@ impl Ui {
         buttons
     }
 
-    /// The three rows of character keys, with shift and delete, from `top`.
+    /// The four rows of character keys from `top`: digits, then three rows of
+    /// letters or symbols, the last between SHIFT and DEL. The symbol layer has no
+    /// SHIFT.
     fn key_rows(&self, top: u32, height: u32) -> Vec<Button> {
         const KEY_WIDTH: u32 = WIDTH / 10;
+        // SHIFT and DEL take the room of one and a half keys each.
+        const SIDE: u32 = KEY_WIDTH * 3 / 2;
         let mut buttons = Vec::new();
-        let rows = self.layer.rows();
-        for (row, keys) in rows.iter().enumerate() {
+        for (row, keys) in self.layer.rows().iter().enumerate() {
             let count = keys.chars().count() as u32;
             let y = top + row as u32 * height;
-            let mut left = (WIDTH - count * KEY_WIDTH) / 2;
-            if row == 2 {
-                buttons.push(Button::new(
-                    Rect { x: 0, y, width: left.max(KEY_WIDTH), height },
-                    match self.layer {
-                        Layer::Lower => "abc",
-                        Layer::Upper => "ABC",
-                        Layer::Symbols => "1/2",
-                        Layer::MoreSymbols => "2/2",
-                    },
-                    Press::Shift,
-                ));
-                left = left.max(KEY_WIDTH);
+            let last = row == 3;
+            let left = if last {
+                SIDE + (WIDTH - 2 * SIDE - count * KEY_WIDTH) / 2
+            } else {
+                (WIDTH - count * KEY_WIDTH) / 2
+            };
+            if last && self.layer != Layer::Symbols {
+                let mut shift = Button { scale: TEXT_SMALL, ..Button::new(Rect { x: 0, y, width: SIDE, height }, "SHIFT", Press::Shift) };
+                if self.layer == Layer::Upper {
+                    shift.color = PRESSED;
+                }
+                buttons.push(shift);
             }
             for (index, key) in keys.chars().enumerate() {
                 buttons.push(Button::new(
@@ -828,13 +848,8 @@ impl Ui {
                     Press::Key(key),
                 ));
             }
-            if row == 2 {
-                let x = left + count * KEY_WIDTH;
-                buttons.push(Button::new(
-                    Rect { x, y, width: WIDTH - x, height },
-                    "DEL",
-                    Press::Delete,
-                ));
+            if last {
+                buttons.push(Button::new(Rect { x: WIDTH - SIDE, y, width: SIDE, height }, "DEL", Press::Delete));
             }
         }
         buttons
@@ -1072,16 +1087,13 @@ mod tests {
 
     fn type_text(ui: &mut Ui, text: &str) {
         for character in text.chars() {
-            let target = [Layer::Lower, Layer::Upper, Layer::Symbols, Layer::MoreSymbols]
+            let has = |layer: Layer| character == ' ' || layer.rows().concat().contains(character);
+            let target = [ui.layer, Layer::Lower, Layer::Upper, Layer::Symbols]
                 .into_iter()
-                .find(|layer| character == ' ' || layer.rows().concat().contains(character))
+                .find(|&layer| has(layer))
                 .unwrap_or_else(|| panic!("no layer has {character:?}"));
             while ui.layer != target {
-                let same_group = matches!(
-                    (ui.layer, target),
-                    (Layer::Lower | Layer::Upper, Layer::Lower | Layer::Upper)
-                        | (Layer::Symbols | Layer::MoreSymbols, Layer::Symbols | Layer::MoreSymbols)
-                );
+                let same_group = matches!((ui.layer, target), (Layer::Lower | Layer::Upper, Layer::Lower | Layer::Upper));
                 tap_button(ui, if same_group { Press::Shift } else { Press::SwitchSymbols });
             }
             tap_button(ui, Press::Key(character));
@@ -1289,7 +1301,7 @@ mod tests {
         let mut ui = Ui::default();
         ui.set_networks((0..12).map(|index| network(&format!("network {index}"))).collect());
         ui.set_sensors(rows(9), rows(12));
-        let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols, Layer::MoreSymbols];
+        let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols];
         let mut pages = vec![
             (Page::Home, Layer::Lower),
             (Page::Power, Layer::Lower),
@@ -1321,7 +1333,7 @@ mod tests {
     #[test]
     fn every_fixed_label_fits_its_button() {
         let mut ui = Ui::default();
-        let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols, Layer::MoreSymbols];
+        let keyboards = [Layer::Lower, Layer::Upper, Layer::Symbols];
         let mut pages: Vec<(Page, Layer)> = [
             Page::Home,
             Page::Power,
@@ -1560,6 +1572,13 @@ mod tests {
         assert_eq!(sent(tap_button(&mut ui, Press::Key('c'))), [3]);
         assert!(!ui.control);
         assert_eq!(sent(tap_button(&mut ui, Press::Key('c'))), b"c");
+        // Shift too; the digits and the bottom row's comma and period are always there.
+        assert!(tap_button(&mut ui, Press::Shift).is_none());
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('A'))), b"A");
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('a'))), b"a");
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('1'))), b"1");
+        assert_eq!(sent(tap_button(&mut ui, Press::Key(','))), b",");
+        assert_eq!(sent(tap_button(&mut ui, Press::Key('.'))), b".");
         // The Wi-Fi passphrase is not touched.
         assert!(ui.typed.is_empty());
         // Hiding the keyboard gives more lines, and the shell is told.
