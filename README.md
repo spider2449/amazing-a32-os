@@ -666,7 +666,8 @@ terminal.
 
 The keyboard was checked on RAM boots: with `ui tap`, `ls` typed in xterm ran, and KB hid
 the keyboard and showed it again in its place; by hand, the user typed commands, used
-symbol keys and the KB button. svkbd once ended with `BadValue` from `XTestFakeInput`
+symbol keys and the KB button. Then flashed: the phone booted from it, the keyboard
+started with the desktop, and `ls` typed on it ran in xterm. svkbd once ended with `BadValue` from `XTestFakeInput`
 while a second copy was running, before the script could find the first one; that did
 not happen again. A key with a symbol missing from the X server's keymap may cause it,
 since the server has only its default keymap.
