@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-const ROOT: &str = "/data/alpine";
+pub const ROOT: &str = "/data/alpine";
 // A real file: `bin/sh` is a link to an absolute path, which only resolves in the chroot.
 const ROOT_MARKER: &str = "/data/alpine/bin/busybox";
 const SHELL: &str = "/bin/sh";
@@ -283,6 +283,21 @@ pub fn ssh_service() {
         }
         thread::sleep(SSHD_CHECK);
     }
+}
+
+/// Starts a program in the chroot without waiting for it, with its output appended
+/// to `log_path`, a path outside the chroot. Returns its process id; `reap_forever`
+/// collects it when it ends, so its entry in /proc shows whether it still runs.
+pub fn spawn(program: &str, arguments: &[&str], environment: &[(&str, &str)], log_path: &str) -> io::Result<u32> {
+    prepare()?;
+    let log_file = File::options().create(true).append(true).open(log_path)?;
+    let child = chroot_command(program)?
+        .args(arguments)
+        .envs(environment.iter().copied())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+    Ok(child.id())
 }
 
 fn start_sshd() -> io::Result<u32> {

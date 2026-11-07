@@ -55,6 +55,9 @@ const TERMINAL_KEY_HEIGHT: u32 = 48;
 const TERMINAL_KEYS_TOP: u32 = HEIGHT - 6 * TERMINAL_KEY_HEIGHT;
 const HIDE_KEYS: Rect = Rect { x: 258, y: 2, width: 106, height: 40 };
 const LEAVE_CONSOLE: Rect = Rect { x: 368, y: 2, width: 106, height: 40 };
+const MESSAGE_COLUMNS: usize = ((WIDTH - MARGIN * 2) / (CHAR_WIDTH * TEXT_SMALL)) as usize;
+// The home page has no room left below, so this sits beside its title.
+const OPEN_DESKTOP: Rect = LEAVE_CONSOLE;
 
 // Laid out like a phone keyboard: digits on top, then three rows of letters, the
 // last between SHIFT and DEL. The symbol layer holds every other printable
@@ -118,6 +121,8 @@ pub enum Request {
     TerminalSize { columns: usize, rows: usize },
     /// What was typed on the console page, for the shell.
     TerminalInput(Vec<u8>),
+    /// Starts the X11 desktop, which takes over the screen until it ends.
+    StartDesktop,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -151,6 +156,7 @@ enum Page {
     ConfirmRemoveSensor,
     Camera,
     Console,
+    Desktop,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -194,6 +200,8 @@ enum Press {
     Tab,
     Enter,
     Arrow(u8),
+    OpenDesktop,
+    StartDesktop,
 }
 
 struct Button {
@@ -328,6 +336,14 @@ impl Ui {
     /// camera was busy. The last frame stays.
     pub fn live_ended(&mut self, message: String) {
         self.live = None;
+        self.message = message;
+    }
+
+    /// The desktop ended, or did not start; the panel shows again, on its page.
+    pub fn desktop_ended(&mut self, message: String) {
+        self.page = Page::Desktop;
+        self.pressed = None;
+        self.finger_down = false;
         self.message = message;
     }
 
@@ -559,6 +575,11 @@ impl Ui {
                 self.console_scroll = self.console_scroll.min(self.max_scroll());
                 return Some(self.terminal_size());
             }
+            Press::OpenDesktop => self.page = Page::Desktop,
+            Press::StartDesktop => {
+                self.message = "Starting the desktop...".to_string();
+                return Some(Request::StartDesktop);
+            }
             Press::Control => self.control = !self.control,
             Press::Escape => return self.send(vec![0x1B]),
             Press::Tab => return self.send(vec![b'\t']),
@@ -620,20 +641,28 @@ impl Ui {
     fn buttons(&self) -> Vec<Button> {
         match self.page {
             // Five to a row only fit at the small size, and BLUETOOTH not even then.
-            Page::Home => [
-                ("WI-FI", Press::OpenNetworks),
-                ("BLE", Press::OpenBluetooth),
-                ("CAMERA", Press::OpenCamera),
-                ("CONSOLE", Press::OpenConsole),
-                ("POWER", Press::OpenPower),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, press))| Button {
-                scale: TEXT_SMALL,
-                ..Button::new(split(BOTTOM_ROW, 5, index as u32), label, press)
-            })
-            .collect(),
+            Page::Home => {
+                let mut buttons: Vec<Button> = [
+                    ("WI-FI", Press::OpenNetworks),
+                    ("BLE", Press::OpenBluetooth),
+                    ("CAMERA", Press::OpenCamera),
+                    ("CONSOLE", Press::OpenConsole),
+                    ("POWER", Press::OpenPower),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, press))| Button {
+                    scale: TEXT_SMALL,
+                    ..Button::new(split(BOTTOM_ROW, 5, index as u32), label, press)
+                })
+                .collect();
+                buttons.push(Button { scale: TEXT_SMALL, ..Button::new(OPEN_DESKTOP, "DESKTOP", Press::OpenDesktop) });
+                buttons
+            }
+            Page::Desktop => vec![
+                Button::new(FIRST_ACTION, "START", Press::StartDesktop),
+                Button::new(BOTTOM_ROW, "BACK", Press::Home),
+            ],
             Page::Console => self.console_buttons(),
             Page::Camera => {
                 let mut live = Button::new(split(BOTTOM_ROW, 4, 2), "LIVE", Press::ToggleLive);
@@ -904,6 +933,27 @@ impl Ui {
                 canvas.draw_text(MARGIN, 300, TEXT_MEDIUM, "or recorded.", FOREGROUND);
             }
             Page::Console => self.render_console(canvas),
+            Page::Desktop => {
+                title(canvas, "DESKTOP");
+                let lines = [
+                    "X11 with the JWM window",
+                    "manager, from Alpine.",
+                    "",
+                    "Tap: left button.",
+                    "Move the finger: drag.",
+                    "Hold still 1.5 s: right button.",
+                    "",
+                    "Leave with Exit in the menu",
+                    "of the JWM button.",
+                ];
+                for (index, line) in lines.iter().enumerate() {
+                    canvas.draw_text(MARGIN, 330 + index as u32 * 30, TEXT_SMALL, line, FOREGROUND);
+                }
+                // A failure can name several packages, so the message wraps here.
+                for (index, line) in wrap(&self.message, MESSAGE_COLUMNS).iter().take(4).enumerate() {
+                    canvas.draw_text(MARGIN, 76 + index as u32 * 26, TEXT_SMALL, line, ACCENT);
+                }
+            }
             Page::Camera => {
                 title(canvas, "CAMERA");
                 match &self.photo {
@@ -932,7 +982,7 @@ impl Ui {
             canvas.fill(button.area.inset(2), color);
             canvas.draw_text_centered(button.area, button.scale, &button.label, FOREGROUND);
         }
-        if !self.message.is_empty() && !matches!(self.page, Page::Home | Page::Console) {
+        if !self.message.is_empty() && !matches!(self.page, Page::Home | Page::Console | Page::Desktop) {
             let y = if self.page == Page::Keyboard { 400 } else { 76 };
             canvas.draw_text(MARGIN, y, TEXT_SMALL, &self.message, ACCENT);
         }
@@ -1057,6 +1107,37 @@ fn render_bluetooth(canvas: &mut Canvas, status: &Snapshot, none_saved: bool) {
     for (index, line) in status.bluetooth_nearby.iter().take(rows).enumerate() {
         canvas.draw_text(MARGIN, NEARBY_TOP + 34 + index as u32 * NEARBY_STEP, TEXT_SMALL, line, FOREGROUND);
     }
+}
+
+/// Splits text into lines of at most `columns` characters, at spaces where it can.
+fn wrap(text: &str, columns: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let mut word = word.to_string();
+        loop {
+            let needed = if line.is_empty() { word.len() } else { line.len() + 1 + word.len() };
+            if needed <= columns {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&word);
+                break;
+            }
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                continue;
+            }
+            // A word longer than a line is cut.
+            let rest = word.split_off(columns);
+            lines.push(word);
+            word = rest;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn title(canvas: &mut Canvas, text: &str) {
@@ -1642,5 +1723,38 @@ mod tests {
             let width = (button.label.chars().count() as u32 * CHAR_WIDTH - 1) * button.scale;
             assert!(width <= button.area.width, "{:?}", button.label);
         }
+    }
+
+    #[test]
+    fn desktop_starts_from_its_page_and_returns_to_it() {
+        use crate::display::tests::rgba8888;
+        let mut canvas = Canvas::new(rgba8888());
+        let mut ui = Ui::default();
+        // The button beside the title fits its label and is clear of the title.
+        let open = ui.buttons().into_iter().find(|button| button.press == Press::OpenDesktop).unwrap();
+        let width = (open.label.len() as u32 * CHAR_WIDTH - 1) * open.scale;
+        assert!(width <= open.area.width);
+        assert!(MARGIN + "AMAZING A32".len() as u32 * CHAR_WIDTH * TEXT_LARGE <= open.area.x);
+
+        assert!(tap_button(&mut ui, Press::OpenDesktop).is_none());
+        assert_eq!(ui.page, Page::Desktop);
+        assert!(matches!(tap_button(&mut ui, Press::StartDesktop), Some(Request::StartDesktop)));
+        ui.render(&mut canvas, &Snapshot::default());
+
+        ui.desktop_ended("Not started: not installed: xorg-server xf86-video-fbdev jwm".to_string());
+        assert_eq!(ui.page, Page::Desktop);
+        ui.render(&mut canvas, &Snapshot::default());
+        tap_button(&mut ui, Press::Home);
+        assert_eq!(ui.page, Page::Home);
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_cuts_long_words() {
+        assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
+        assert_eq!(wrap("abcdefghij x", 4), vec!["abcd", "efgh", "ij x"]);
+        assert_eq!(wrap("", 4), Vec::<String>::new());
+        let lines = wrap("Not started: not installed: xorg-server xf86-video-fbdev xf86-input-evdev jwm", MESSAGE_COLUMNS);
+        assert!(lines.iter().all(|line| line.len() <= MESSAGE_COLUMNS));
+        assert_eq!(lines.join(" "), "Not started: not installed: xorg-server xf86-video-fbdev xf86-input-evdev jwm");
     }
 }

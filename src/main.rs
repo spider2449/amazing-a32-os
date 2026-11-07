@@ -23,6 +23,10 @@ mod photo;
 #[cfg(any(target_os = "linux", test))]
 mod properties;
 
+#[cfg(target_os = "linux")]
+mod desktop;
+#[cfg(target_os = "linux")]
+mod pointer;
 #[cfg(any(target_os = "linux", test))]
 mod dhcp;
 #[cfg(any(target_os = "linux", test))]

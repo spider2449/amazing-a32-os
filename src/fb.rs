@@ -108,6 +108,12 @@ impl Framebuffer {
         check(rc)
     }
 
+    /// Forgets what the screen shows, after another program drew on it, so that the
+    /// next frame is copied whole.
+    pub fn forget(&mut self) {
+        self.shown.clear();
+    }
+
     /// Shows a frame. It does nothing at all if no row changed, because telling the
     /// driver to update the panel costs time too.
     pub fn present(&mut self, pixels: &[u8]) -> io::Result<()> {

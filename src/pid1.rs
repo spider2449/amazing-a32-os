@@ -16,11 +16,13 @@ use crate::bluetooth;
 use crate::sensors;
 use crate::charging::{self, Event as PowerEvent};
 use crate::dhcp::{self, MessageType};
-use crate::display::Canvas;
+use crate::desktop;
+use crate::display::{Canvas, Format};
 use crate::camera;
 use crate::fb::Framebuffer;
 use crate::photo;
-use crate::input::{self, Action, PowerKey, Touch, EVENT_LEN};
+use crate::input::{self, Action, Gesture, PowerKey, Touch, EVENT_LEN};
+use crate::pointer::Pointer;
 use crate::shell::{self, Platform};
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
@@ -322,6 +324,63 @@ enum PanelInput {
     /// The live view with this number has a new frame waiting, or ended and why.
     LiveFrame(u32),
     LiveEnded(u32, String),
+    /// The desktop has the screen now, and later gave it back, with why.
+    DesktopStarted,
+    DesktopEnded(String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DesktopMode {
+    Off,
+    /// The X server is starting; it may already draw, so the panel does not.
+    Starting,
+    On,
+}
+
+/// Makes the desktop's mouse if needed, then starts the desktop in a thread that
+/// reports when it runs and when it ends.
+fn start_desktop(pointer: &mut Option<Pointer>, format: Format, panel: &mut Ui, input: &mpsc::Sender<PanelInput>) -> DesktopMode {
+    if pointer.is_none() {
+        match Pointer::create(format.width, format.height) {
+            Ok(created) => *pointer = Some(created),
+            Err(err) => {
+                log(&format!("panel: desktop pointer: {err}"));
+                panel.desktop_ended(format!("Not started: the pointer: {err}"));
+                return DesktopMode::Off;
+            }
+        }
+    }
+    log("panel: starting the desktop");
+    let input = input.clone();
+    let spawned = thread::Builder::new().spawn(move || {
+        let message = match desktop::start() {
+            Ok(session) => {
+                let _ = input.send(PanelInput::DesktopStarted);
+                format!("The desktop ended: {}.", session.wait())
+            }
+            Err(err) => format!("Not started: {err}"),
+        };
+        let _ = input.send(PanelInput::DesktopEnded(message));
+    });
+    match spawned {
+        Ok(_) => DesktopMode::Starting,
+        Err(err) => {
+            panel.desktop_ended(format!("Not started: {err}"));
+            DesktopMode::Off
+        }
+    }
+}
+
+/// Moves the desktop's mouse. A failure is logged, and the touch is lost.
+fn send_pointer(pointer: &mut Option<Pointer>, events: &[input::PointerEvent]) {
+    if events.is_empty() {
+        return;
+    }
+    if let Some(pointer) = pointer.as_mut() {
+        if let Err(err) = pointer.send(events) {
+            log(&format!("panel: desktop pointer: {err}"));
+        }
+    }
 }
 
 /// Live video on the panel ends after this long; LIVE starts it again. Frames keep
@@ -1378,8 +1437,16 @@ fn run_status_screen() -> io::Result<()> {
     let mut was_on = true;
     // A touch that wakes the screen must not also press a button under the finger.
     let mut waking = false;
+    // The desktop's mouse, made once and kept, and the touch being turned into it.
+    let mut desktop = DesktopMode::Off;
+    let mut pointer: Option<Pointer> = None;
+    let mut gesture = Gesture::default();
+    let clock = Instant::now();
     loop {
         heartbeat(Service::Panel);
+        if desktop == DesktopMode::On {
+            send_pointer(&mut pointer, &gesture.tick(clock.elapsed()));
+        }
         let on = SCREEN_ON.load(Ordering::Acquire);
         if on && !was_on {
             // Turned on by the power key.
@@ -1395,7 +1462,7 @@ fn run_status_screen() -> io::Result<()> {
             panel.reset();
             live_request(&mut live, &mut live_count, &mut panel, Request::StopLive, &input);
             was_on = false;
-        } else if on {
+        } else if on && desktop == DesktopMode::Off {
             let t = Instant::now();
             let status = snapshot();
             // Taps until the next drawing pick from these, which are what is shown.
@@ -1411,8 +1478,10 @@ fn run_status_screen() -> io::Result<()> {
             }
         }
 
-        // Redraw when something changes, and otherwise once a second.
-        if let Ok(first) = inputs.recv_timeout(Duration::from_secs(1)) {
+        // Redraw when something changes, and otherwise once a second. A finger held
+        // on the desktop wakes this sooner, for its right click.
+        let wait = gesture.wait_limit(clock.elapsed()).map_or(Duration::from_secs(1), |limit| limit.min(Duration::from_secs(1)));
+        if let Ok(first) = inputs.recv_timeout(wait) {
             // Only what is queued now: events that keep arriving, such as live
             // frames, would otherwise hold off drawing for ever.
             let queued: Vec<PanelInput> = std::iter::once(first).chain(inputs.try_iter()).collect();
@@ -1429,9 +1498,19 @@ fn run_status_screen() -> io::Result<()> {
                             waking = position.is_some();
                             continue;
                         }
+                        // While the desktop starts, touches go nowhere.
+                        if desktop != DesktopMode::Off {
+                            if desktop == DesktopMode::On {
+                                send_pointer(&mut pointer, &gesture.touch(position, clock.elapsed()));
+                            }
+                            continue;
+                        }
                         match panel.touch(position) {
                             Some(request @ (Request::TerminalSize { .. } | Request::TerminalInput(_))) => {
                                 console_request(&mut shell, &mut panel, request, &input);
+                            }
+                            Some(Request::StartDesktop) => {
+                                desktop = start_desktop(&mut pointer, format, &mut panel, &input);
                             }
                             Some(request @ (Request::Live(_) | Request::StopLive)) => {
                                 live_request(&mut live, &mut live_count, &mut panel, request, &input);
@@ -1451,6 +1530,20 @@ fn run_status_screen() -> io::Result<()> {
                             log(&format!("panel: console shell ended: {status}"));
                             panel.terminal_note(&format!("[the shell ended: {status}; type to start a new one]"));
                         }
+                    }
+                    PanelInput::DesktopStarted => {
+                        log("panel: desktop started");
+                        desktop = DesktopMode::On;
+                        gesture = Gesture::default();
+                    }
+                    PanelInput::DesktopEnded(message) => {
+                        log(&format!("panel: desktop: {message}"));
+                        desktop = DesktopMode::Off;
+                        gesture = Gesture::default();
+                        // The X server drew over the panel.
+                        framebuffer.forget();
+                        last_use = Instant::now();
+                        panel.desktop_ended(message);
                     }
                     PanelInput::Networks(networks) => panel.set_networks(networks),
                     PanelInput::Photo(image) => {
@@ -1695,7 +1788,11 @@ fn panel_requests(requests: mpsc::Receiver<Request>, replies: mpsc::Sender<Panel
                 Err(err) => say(format!("Not removed: {err}")),
             },
             // Handled by the panel loop, which owns the shell; never sent here.
-            Request::TerminalSize { .. } | Request::TerminalInput(_) | Request::Live(_) | Request::StopLive => {}
+            Request::TerminalSize { .. }
+            | Request::TerminalInput(_)
+            | Request::Live(_)
+            | Request::StopLive
+            | Request::StartDesktop => {}
             Request::Photo(camera) => match take_photo(camera) {
                 Ok(photo) => {
                     say(format!("{camera}: {:.1} s, level {:.0}", photo.elapsed.as_secs_f32(), photo.mean_level));
@@ -2373,7 +2470,7 @@ fn wait_for_touch_device() -> io::Result<(u32, u32)> {
     find_input_device(TOUCH_NAME)
 }
 
-fn find_input_device(wanted: &str) -> io::Result<(u32, u32)> {
+pub(crate) fn find_input_device(wanted: &str) -> io::Result<(u32, u32)> {
     for entry in fs::read_dir(SYS_INPUT)? {
         let path = entry?.path();
         let matches = fs::read_to_string(path.join("device/name"))

@@ -530,7 +530,7 @@ seconds powers off, as before. The RESTART and POWER OFF buttons were each teste
 the network.
 
 The home page's buttons are WI-FI, BLE, CAMERA, CONSOLE and POWER, in small letters
-so that five fit. CONSOLE is a terminal with Alpine's login shell (`/bin/sh -l` in the
+so that five fit, and DESKTOP beside the title, for the X11 desktop (see Desktop). CONSOLE is a terminal with Alpine's login shell (`/bin/sh -l` in the
 chroot, as root, `TERM=vt100`) on a pseudo-terminal, 39 columns wide. The init's own
 commands stay on the USB serial console. The page has a small terminal emulator
 (`src/terminal.rs`) that handles what a shell and line-based programs use: CR, LF,
@@ -592,6 +592,58 @@ fast as 2.8 ms. Other old devices may have the same problem.
 
 `/dev/touch` was missing on one early boot. Later boots found it each time, and
 `/run/init.log` keeps the reason if it happens again.
+
+## Desktop
+
+The panel's DESKTOP page starts an X11 desktop: the X server on `fb0` with the JWM window
+manager, from Alpine. It needs these packages, and the page names any that are missing:
+
+```text
+apk add xorg-server xf86-video-fbdev xf86-input-evdev jwm xterm font-dejavu
+```
+
+With them and a few test tools, `apk` reported 267 MiB for all of Alpine. The X server
+took 20 to 23 MB of memory, JWM 6 MB and each xterm 5 MB, and the idle CPU use stayed
+near 0%.
+
+Found on this phone, and worth checking the same way on other old devices:
+
+- The kernel has no virtual terminals (no `tty0`), yet the X server starts with
+  `-novtswitch -sharevts`. Its `fbdev` driver draws into `fb0`, and the screen showed each
+  change, such as a clock ticking every second, without the pan the panel uses.
+- The touch screen reports the old multi-touch protocol A: `SYN_MT_REPORT`, no tracking
+  ids, and never the `ABS_X` and `ABS_Y` it lists. The X server's `evdev` driver got no
+  events from it at all, so the pointer did not move. Raw events read correctly with
+  `evtest`, so the event layout was not the cause.
+- The kernel has `uinput`. So the init reads the touches, as it does for the panel, and
+  moves a mouse it makes with `uinput`, `/dev/input/a32-pointer`, with a left and a right
+  button and axes as large as the screen. The X server is given only that device.
+
+Touches become mouse events in `src/input.rs`. A tap clicks the left button where the
+finger was. A finger that moves more than 20 pixels drags with the left button from where
+it came down; a held finger drifted about 6 pixels. A finger held still for 1.5 seconds
+clicks the right button. The user tried 0.7, 1, 2 and 1.5 seconds by hand and chose 1.5.
+
+Alpine's JWM settings open the desktop's menu with the left button too, so a drag that
+started on the empty desktop opened the menu first. The init therefore starts JWM with a
+copy, `/run/a32-jwmrc`, where that menu and the JWM button use the right button. A
+`/root/.jwmrc` in Alpine is used instead, as it is.
+
+The panel stops drawing while the desktop runs, and touches go only to the desktop. The
+power key and the screen timeout work as on the panel. The desktop ends when JWM or the
+X server ends, for example with Exit in the JWM menu; the init then ends the other one,
+draws the whole panel again, and shows why on the DESKTOP page. The X server's log is in
+`/run/xorg.log`, and the output of both programs in `/run/desktop.log`. Alpine's `/tmp`
+is on `/data`, so the server's lock and socket from before a restart stay there; the init
+removes them before starting, once it has found that nothing listens on them.
+
+Checked on RAM boots, with `ui tap` and screenshots, and by hand: the JWM menu opened a
+terminal; the user dragged windows, switched desktops and opened the right-button menu;
+Exit with OK returned to the panel with the X server, JWM and xterm ended; killing the X
+server returned to the panel too; and a second start worked. `ui drag` cannot move a
+window, because it sends all of its points at once, and JWM reads the pointer's position
+when the button goes down, by which time the pointer is already at the end. There is no
+on-screen keyboard on the desktop yet.
 
 ## Wi-Fi
 
