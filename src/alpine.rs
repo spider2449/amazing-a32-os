@@ -127,7 +127,7 @@ pub fn with_open_port<T>(port: u16, work: impl FnOnce() -> io::Result<T>) -> io:
     result
 }
 
-fn is_installed() -> bool {
+pub(crate) fn is_installed() -> bool {
     Path::new(ROOT_MARKER).exists()
 }
 

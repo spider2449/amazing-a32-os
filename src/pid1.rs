@@ -2085,6 +2085,9 @@ fn storage_and_network() {
             if fs::read_to_string(USB_NETWORK_SETTING).is_ok_and(|text| text.trim() == "on") {
                 schedule_usb_network(true);
             }
+            if let Err(err) = crate::audio::install() {
+                log(&format!("audio: scripts not installed: {err}"));
+            }
             if let Err(err) = restore_wifi_calibration() {
                 log(&format!("wifi: no calibration from nvdata: {err}"));
             }

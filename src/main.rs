@@ -23,6 +23,8 @@ mod photo;
 #[cfg(any(target_os = "linux", test))]
 mod properties;
 
+#[cfg(any(target_os = "linux", test))]
+mod audio;
 #[cfg(target_os = "linux")]
 mod camera_window;
 #[cfg(target_os = "linux")]

@@ -216,6 +216,60 @@ addresses (`169.254.0.0/16`) answered ping but not SSH, because they are not in 
 firewall's private ranges. The driver takes no MAC address from `f_rndis/ethaddr`
 here: the adapter's address changes on each start.
 
+## Audio
+
+The init installs two commands in Alpine at each start, which need `apk add alsa-utils`:
+
+```sh
+a32-play sound.wav            # or - for WAV on standard input
+a32-play -g 6 sound.wav       # speaker gain: 0 (the default) or 4 to 12 dB
+a32-record voice.wav 10       # seconds; or - for WAV on standard output
+```
+
+On the serial console, put `alpine` before them. Recordings are 16-bit, 48 kHz and
+stereo. The microphone is on the left channel, and the right channel is silent. To play other formats,
+convert them first: `ffmpeg -i in.mp3 -ar 48000 -ac 2 -f wav - | a32-play -`. Only
+48 kHz stereo WAV was tested for playback.
+
+**Do not use ALSA's capture device directly.** The stock kernel's driver panics the phone,
+which then restarts:
+
+- The driver allows a 36864-byte capture buffer, but only 32 KiB is mapped. `arecord`
+  with its default buffer faulted in `mtk_capture_pcm_copy`, at 32 KiB past the start.
+- Memory-mapped capture faulted in `snd_pcm_mmap_data_fault`. ALSA's `plug` used it to
+  convert the format, with the hardware at 48 kHz stereo and `arecord` asking for mono.
+
+So `/dev/snd` normally holds only `controlC0`. Each script creates its PCM node while
+it runs, opens the hardware device with read/write access and a 4096-frame buffer, and
+removes the node. Any other program gets "No such file or directory" instead of a
+panic. Playback is guarded the same way, as a precaution: its memory-mapped access
+was not tested, since a failure restarts the phone. The kernel has no SysV IPC, so
+`dsnoop` cannot be used to fix the buffer size. The hardware also returned only zeros
+at 16 kHz mono.
+
+The speaker is on the PMIC (`Speaker_Amp_Switch`); `Ext_Speaker_Amp_Switch` gave no
+sound. The amplifier gave no sound when switched on before playback, so `a32-play`
+waits for the stream to run and the very start of a sound may be cut. The microphone
+goes through preamp 1 and ADC 1, at 18 dB.
+
+`scripts/test-audio.sh` plays a quiet 1 kHz tone and records it. It passed on a RAM
+boot: the 1 kHz level at the microphone rose by about 60 dB during the tone. It also
+checks streaming, that no PCM node is left, and that direct capture is refused. The
+tone (-26 dBFS, speaker gain 0 dB) was also heard from the phone, faintly. Beyond that, this
+was measured with the microphone: sound quality and the highest safe volume were not
+checked.
+
+Speaker gain and level add up, so -12 dBFS at 6 dB measured the same as -6 dBFS at
+0 dB. The gain followed the setting: 6.0 dB and 11.8 dB louder at 6 and 12 dB, with
+a -26 dBFS tone. At the microphone, the third harmonic was -49 dB below the tone at
+-26 dBFS and 0 dB, -24 dB at -6 dBFS and 0 dB, and -21 dB at -6 dBFS and 12 dB, where
+the tone was also about 3.6 dB weaker than expected. The microphone was not
+saturated, but its share of that distortion is not known. `-g` stops at 12 dB, since
+above that only a weak signal was tried. Full-scale input at 12 dB was not tried.
+
+Headphones, the earpiece, a second
+microphone and calls were not tested.
+
 ## Firewall
 
 The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic
