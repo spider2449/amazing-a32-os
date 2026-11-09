@@ -288,6 +288,14 @@ const BLUETOOTH_DEVICE: &str = "/dev/stpbt";
 // Holds `on` while the scan is wanted. Off unless chosen, because Bluetooth shares
 // the radio with Wi-Fi.
 const BLUETOOTH_SETTING: &str = "/data/a32/bluetooth";
+const USB_NETWORK_SETTING: &str = "/data/a32/usb-network";
+// Long enough for the console to send its reply before the USB link drops.
+const USB_SWITCH_DELAY: Duration = Duration::from_secs(1);
+const USB_CONSOLE_WAIT: Duration = Duration::from_secs(60);
+const USB_CHECK: Duration = Duration::from_millis(200);
+const USB_INTERFACE_WAIT: Duration = Duration::from_secs(5);
+const USB_LEASE_WAIT: Duration = Duration::from_secs(1);
+const USB_LEASE_SECONDS: u32 = 86400;
 const BLUETOOTH_REPLY_WAIT: Duration = Duration::from_secs(2);
 const BLUETOOTH_RETRY: Duration = Duration::from_secs(30);
 const BLUETOOTH_IDLE_CHECK: Duration = Duration::from_secs(2);
@@ -345,6 +353,13 @@ static PERSISTENT_LOG_ON: Mutex<bool> = Mutex::new(false);
 /// Set when the console device exists. A host does not need to be attached, so
 /// running on battery without USB does not count as a failure.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
+static USB_NETWORK: Mutex<Option<UsbNetwork>> = Mutex::new(None);
+
+/// The DHCP server for the USB network, while that network is on.
+struct UsbNetwork {
+    running: Arc<AtomicBool>,
+    server: thread::JoinHandle<()>,
+}
 
 /// Whether the backlight is on and the panel is being drawn.
 static SCREEN_ON: AtomicBool = AtomicBool::new(true);
@@ -2067,6 +2082,9 @@ fn storage_and_network() {
                 log(&format!("log: not kept across restarts: {err}"));
             }
             load_settings();
+            if fs::read_to_string(USB_NETWORK_SETTING).is_ok_and(|text| text.trim() == "on") {
+                schedule_usb_network(true);
+            }
             if let Err(err) = restore_wifi_calibration() {
                 log(&format!("wifi: no calibration from nvdata: {err}"));
             }
@@ -2910,14 +2928,7 @@ impl Platform for KernelPlatform {
             if !DATA_READY.load(Ordering::Acquire) {
                 return Err(io::Error::other("/data is not mounted, so the choice could not be kept"));
             }
-            if on {
-                write_private_file(BLUETOOTH_SETTING, "on\n")?;
-            } else {
-                match fs::remove_file(BLUETOOTH_SETTING) {
-                    Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
-                    _ => File::open(SETTINGS_DIR)?.sync_all()?,
-                }
-            }
+            keep_switch(BLUETOOTH_SETTING, on)?;
             bluetooth_state().wanted = on;
             log(&format!("bluetooth: turned {}", if on { "on" } else { "off" }));
             // The scan starts or stops within a couple of seconds.
@@ -2928,6 +2939,21 @@ impl Platform for KernelPlatform {
 
     fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String> {
         change_saved_sensor(add, address)
+    }
+
+    fn usb_network(&self, switch: Option<bool>) -> io::Result<String> {
+        if let Some(on) = switch {
+            if !DATA_READY.load(Ordering::Acquire) {
+                return Err(io::Error::other("/data is not mounted, so the choice could not be kept"));
+            }
+            keep_switch(USB_NETWORK_SETTING, on)?;
+            schedule_usb_network(on);
+            return Ok(format!(
+                "usb network: turning {}; the serial port reconnects in a moment",
+                if on { "on" } else { "off" }
+            ));
+        }
+        Ok(usb_network_report())
     }
 
     fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
@@ -3022,6 +3048,130 @@ fn run_ip(arguments: &[&str]) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!("ip {arguments:?} failed: {status}")))
+    }
+}
+
+/// Keeps an on or off choice as a file that exists only while it is on.
+fn keep_switch(path: &str, on: bool) -> io::Result<()> {
+    if on {
+        return write_private_file(path, "on\n");
+    }
+    match fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => File::open(SETTINGS_DIR)?.sync_all(),
+    }
+}
+
+fn usb_network_report() -> String {
+    let read = |path: String| fs::read_to_string(path).map_or_else(|err| err.to_string(), |text| text.trim().to_owned());
+    let running = USB_NETWORK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some();
+    format!(
+        "usb network: {}\nphone: {}\ncomputer: {}\nfunctions: {}\nusb state: {}",
+        if running { "on" } else { "off" },
+        usb::PHONE_ADDRESS,
+        usb::COMPUTER_ADDRESS,
+        read(format!("{}/functions", usb::ANDROID_USB)),
+        read(USB_STATE.to_owned()),
+    )
+}
+
+/// Changes the USB gadget on its own thread, because the change disconnects the
+/// serial console, which may be the one that asked. The console always starts on
+/// the serial-only gadget, so that a fault here cannot take away the way in.
+fn schedule_usb_network(on: bool) {
+    let spawned = thread::Builder::new().spawn(move || {
+        let start = Instant::now();
+        while !CONSOLE_READY.load(Ordering::Acquire) {
+            if start.elapsed() > USB_CONSOLE_WAIT {
+                log("usb network: the console did not start, so nothing was changed");
+                return;
+            }
+            thread::sleep(USB_CHECK);
+        }
+        thread::sleep(USB_SWITCH_DELAY);
+        match set_usb_network(on) {
+            Ok(()) => log(&format!("usb network: {}", if on { "on" } else { "off" })),
+            Err(err) => log(&format!("usb network: failed: {err}")),
+        }
+    });
+    if let Err(err) = spawned {
+        log(&format!("usb network: thread failed: {err}"));
+    }
+}
+
+fn set_usb_network(on: bool) -> io::Result<()> {
+    let mut current = USB_NETWORK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if on == current.is_some() {
+        return Ok(());
+    }
+    let root = Path::new(usb::ANDROID_USB);
+    if let Some(network) = current.take() {
+        network.running.store(false, Ordering::Release);
+        let _ = network.server.join();
+        return usb::enable_serial(root);
+    }
+    match usb::enable_serial_and_network(root).and_then(|()| start_usb_network()) {
+        Ok(network) => {
+            *current = Some(network);
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(restore) = usb::enable_serial(root) {
+                log(&format!("usb network: could not restore the serial port: {restore}"));
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Gives the new interface its address and starts answering DHCP on it.
+fn start_usb_network() -> io::Result<UsbNetwork> {
+    let interface = format!("/sys/class/net/{}", usb::NETWORK_INTERFACE);
+    let start = Instant::now();
+    while !Path::new(&interface).exists() {
+        if start.elapsed() > USB_INTERFACE_WAIT {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, format!("no {interface}")));
+        }
+        thread::sleep(USB_CHECK);
+    }
+    let address = format!("{}/{}", usb::PHONE_ADDRESS, usb::PREFIX_LENGTH);
+    run_ip(&["addr", "add", &address, "dev", usb::NETWORK_INTERFACE])?;
+    run_ip(&["link", "set", usb::NETWORK_INTERFACE, "up"])?;
+
+    let socket = UdpSocket::bind(("0.0.0.0", DHCP_SERVER_PORT))?;
+    socket.set_broadcast(true)?;
+    socket.set_read_timeout(Some(USB_LEASE_WAIT))?;
+    bind_to_device(&socket, usb::NETWORK_INTERFACE)?;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&running);
+    let server = thread::Builder::new().spawn(move || serve_usb_leases(socket, &flag))?;
+    Ok(UsbNetwork { running, server })
+}
+
+fn serve_usb_leases(socket: UdpSocket, running: &AtomicBool) {
+    let lease = dhcp::ServerLease {
+        server: usb::PHONE_ADDRESS,
+        client: usb::COMPUTER_ADDRESS,
+        netmask: usb::NETMASK,
+        seconds: USB_LEASE_SECONDS,
+    };
+    let mut buffer = [0u8; 1500];
+    while running.load(Ordering::Acquire) {
+        let length = match socket.recv_from(&mut buffer) {
+            Ok((length, _)) => length,
+            Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+            Err(err) => {
+                log(&format!("usb network: dhcp read failed: {err}"));
+                thread::sleep(USB_LEASE_WAIT);
+                continue;
+            }
+        };
+        if let Some(reply) = dhcp::serve(&buffer[..length], &lease) {
+            if let Err(err) = socket.send_to(&reply, ("255.255.255.255", DHCP_CLIENT_PORT)) {
+                log(&format!("usb network: dhcp reply failed: {err}"));
+            }
+        }
     }
 }
 

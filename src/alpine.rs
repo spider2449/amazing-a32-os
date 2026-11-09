@@ -88,6 +88,8 @@ pub fn apply_firewall() -> io::Result<()> {
         vec!["-A", "INPUT", "-p", "icmp", "-j", "ACCEPT"],
         // DHCP replies, which are broadcast and so never look like an open connection.
         vec!["-A", "INPUT", "-p", "udp", "--dport", "68", "-j", "ACCEPT"],
+        // DHCP requests from the computer on the USB cable, which has no address yet.
+        vec!["-A", "INPUT", "-i", crate::usb::NETWORK_INTERFACE, "-p", "udp", "--dport", "67", "-j", "ACCEPT"],
     ];
     for port in LOCAL_PORTS {
         for source in LOCAL_SOURCES {

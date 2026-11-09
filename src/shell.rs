@@ -26,6 +26,10 @@ const HELP: &str = "commands:
   wifi join SSID PASSPHRASE    join a WPA2 network and keep it for later starts;
                                use double quotes around a value with spaces
   wifi forget                  leave the network and erase its saved details
+  usbnet                       show the USB network state
+  usbnet on|off                add or remove a network adapter on the USB cable,
+                               kept for later starts; the serial port reconnects
+                               and may get another number on the computer
   tcp HOST:PORT                try a TCP connection
   bluetooth                    show the BLE scan and the devices heard
   bluetooth on|off             start or stop the BLE scan, kept for later starts
@@ -74,6 +78,9 @@ pub trait Platform {
     fn bluetooth(&self, switch: Option<bool>) -> io::Result<String>;
     /// Saves or removes a BLE sensor, by its address as text.
     fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String>;
+    /// Adds or removes the USB network adapter and keeps that choice, or with
+    /// `None` describes it.
+    fn usb_network(&self, switch: Option<bool>) -> io::Result<String>;
     /// Takes a photo with the rear or front camera, saves it as a JPEG and
     /// describes it.
     fn photo(&self, camera: &str, path: &str) -> io::Result<String>;
@@ -151,6 +158,9 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         ["bluetooth", "remove", address] => {
             platform.bluetooth_sensor(false, address).and_then(|text| writeln!(out, "{text}"))
         }
+        ["usbnet"] => platform.usb_network(None).and_then(|text| writeln!(out, "{text}")),
+        ["usbnet", "on"] => platform.usb_network(Some(true)).and_then(|text| writeln!(out, "{text}")),
+        ["usbnet", "off"] => platform.usb_network(Some(false)).and_then(|text| writeln!(out, "{text}")),
         ["camera", camera @ ("rear" | "front"), path] => {
             platform.photo(camera, path).and_then(|text| writeln!(out, "{text}"))
         }
@@ -293,6 +303,10 @@ mod tests {
             Ok(format!("lease on {interface}"))
         }
 
+        fn usb_network(&self, switch: Option<bool>) -> io::Result<String> {
+            Ok(format!("usbnet {switch:?}"))
+        }
+
         fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
             Ok(format!("photo {camera} {path}"))
         }
@@ -361,6 +375,14 @@ mod tests {
         assert!(session("bluetooth add 58:2d:34:36:74:93\n").0.contains("sensor add=true 58:2d:34:36:74:93"));
         assert!(session("bluetooth remove 58:2d:34:36:74:93\n").0.contains("sensor add=false 58:2d:34:36:74:93"));
         assert!(session("bluetooth add\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn usbnet_takes_on_or_off() {
+        assert!(session("usbnet\n").0.contains("usbnet None"));
+        assert!(session("usbnet on\n").0.contains("usbnet Some(true)"));
+        assert!(session("usbnet off\n").0.contains("usbnet Some(false)"));
+        assert!(session("usbnet maybe\n").0.contains("unknown command"));
     }
 
     #[test]

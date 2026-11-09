@@ -1,4 +1,5 @@
-//! A minimal DHCP client: gets one lease and does not renew it.
+//! A minimal DHCP client, which gets one lease and does not renew it, and a server
+//! for the single computer at the other end of the USB cable.
 //!
 //! The message handling has no I/O, so it runs on the host in unit tests.
 
@@ -12,6 +13,8 @@ const MAC_LEN: u8 = 6;
 const FLAG_BROADCAST: u16 = 0x8000;
 const COOKIE: [u8; 4] = [99, 130, 83, 99];
 const OPTIONS_START: usize = 240;
+// The BOOTP size, which some clients expect as a minimum.
+const MIN_MESSAGE_LEN: usize = 300;
 
 const OPTION_PAD: u8 = 0;
 const OPTION_NETMASK: u8 = 1;
@@ -91,22 +94,7 @@ pub fn parse_reply(bytes: &[u8], xid: u32, mac: [u8; 6]) -> Option<Reply> {
         lease_seconds: None,
     };
 
-    let mut options = &bytes[OPTIONS_START..];
-    while let Some((&code, rest)) = options.split_first() {
-        match code {
-            OPTION_PAD => {
-                options = rest;
-                continue;
-            }
-            OPTION_END => break,
-            _ => {}
-        }
-        let (&length, rest) = rest.split_first()?;
-        let length = usize::from(length);
-        if rest.len() < length {
-            return None;
-        }
-        let (value, rest) = rest.split_at(length);
+    for (code, value) in read_options(&bytes[OPTIONS_START..])? {
         match code {
             OPTION_MESSAGE_TYPE => {
                 kind = match value.first() {
@@ -125,9 +113,104 @@ pub fn parse_reply(bytes: &[u8], xid: u32, mac: [u8; 6]) -> Option<Reply> {
             }
             _ => {}
         }
-        options = rest;
     }
     reply.kind = kind?;
+    Some(reply)
+}
+
+/// Splits DHCP options into codes and values. A truncated option is `None`.
+fn read_options(mut options: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+    let mut found = Vec::new();
+    while let Some((&code, rest)) = options.split_first() {
+        match code {
+            OPTION_PAD => {
+                options = rest;
+                continue;
+            }
+            OPTION_END => break,
+            _ => {}
+        }
+        let (&length, rest) = rest.split_first()?;
+        let length = usize::from(length);
+        if rest.len() < length {
+            return None;
+        }
+        let (value, rest) = rest.split_at(length);
+        found.push((code, value));
+        options = rest;
+    }
+    Some(found)
+}
+
+/// What the server hands out. It names no router or DNS server on purpose, so that
+/// the computer keeps its own internet connection.
+pub struct ServerLease {
+    pub server: Ipv4Addr,
+    pub client: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub seconds: u32,
+}
+
+/// Answers a client's message, or returns `None` if it needs no answer. An address
+/// other than the lease's is refused, so that a client remembering one starts over.
+pub fn serve(bytes: &[u8], lease: &ServerLease) -> Option<Vec<u8>> {
+    if bytes.len() < OPTIONS_START
+        || bytes[0] != OP_REQUEST
+        || bytes[1] != HTYPE_ETHERNET
+        || bytes[2] != MAC_LEN
+        || bytes[236..240] != COOKIE
+    {
+        return None;
+    }
+
+    let (mut kind, mut requested, mut server) = (None, None, None);
+    for (code, value) in read_options(&bytes[OPTIONS_START..])? {
+        match code {
+            OPTION_MESSAGE_TYPE => kind = value.first().copied(),
+            OPTION_REQUESTED_IP => requested = ipv4(value),
+            OPTION_SERVER_ID => server = ipv4(value),
+            _ => {}
+        }
+    }
+    // A renewing client names its address in `ciaddr` instead of an option.
+    let current = ipv4(&bytes[12..16]).filter(|address| !address.is_unspecified());
+    let wanted = requested.or(current);
+
+    let answer = match kind? {
+        code if code == MessageType::Discover as u8 => MessageType::Offer,
+        code if code == MessageType::Request as u8 => {
+            if server.is_some_and(|chosen| chosen != lease.server) {
+                return None;
+            }
+            if wanted.is_some_and(|address| address != lease.client) {
+                MessageType::Nak
+            } else {
+                MessageType::Ack
+            }
+        }
+        _ => return None,
+    };
+
+    let mut reply = vec![0u8; OPTIONS_START];
+    reply[0] = OP_REPLY;
+    reply[1] = HTYPE_ETHERNET;
+    reply[2] = MAC_LEN;
+    reply[4..8].copy_from_slice(&bytes[4..8]);
+    reply[10..12].copy_from_slice(&bytes[10..12]);
+    reply[28..34].copy_from_slice(&bytes[28..34]);
+    reply[236..240].copy_from_slice(&COOKIE);
+    reply.extend([OPTION_MESSAGE_TYPE, 1, answer as u8]);
+    reply.extend([OPTION_SERVER_ID, 4]);
+    reply.extend(lease.server.octets());
+    if answer != MessageType::Nak {
+        reply[16..20].copy_from_slice(&lease.client.octets());
+        reply.extend([OPTION_LEASE, 4]);
+        reply.extend(lease.seconds.to_be_bytes());
+        reply.extend([OPTION_NETMASK, 4]);
+        reply.extend(lease.netmask.octets());
+    }
+    reply.push(OPTION_END);
+    reply.resize(reply.len().max(MIN_MESSAGE_LEN), 0);
     Some(reply)
 }
 
@@ -241,6 +324,72 @@ mod tests {
         let mut bad = bytes[..OPTIONS_START].to_vec();
         bad.extend([OPTION_MESSAGE_TYPE, 200, 2]);
         assert_eq!(parse_reply(&bad, XID, MAC), None);
+    }
+
+    const LEASE: ServerLease = ServerLease {
+        server: Ipv4Addr::new(192, 168, 42, 1),
+        client: Ipv4Addr::new(192, 168, 42, 2),
+        netmask: Ipv4Addr::new(255, 255, 255, 0),
+        seconds: 86400,
+    };
+
+    #[test]
+    fn a_client_gets_the_lease_through_the_whole_exchange() {
+        let offer = serve(&build_message(XID, MAC, None), &LEASE).unwrap();
+        let parsed = parse_reply(&offer, XID, MAC).unwrap();
+        assert_eq!(parsed.kind, MessageType::Offer);
+        assert_eq!(parsed.address, LEASE.client);
+        assert_eq!(parsed.server, Some(LEASE.server));
+        assert_eq!(parsed.netmask, Some(LEASE.netmask));
+        assert_eq!(parsed.lease_seconds, Some(86400));
+
+        let request = build_message(XID, MAC, Some((LEASE.client, LEASE.server)));
+        let ack = parse_reply(&serve(&request, &LEASE).unwrap(), XID, MAC).unwrap();
+        assert_eq!(ack.kind, MessageType::Ack);
+        assert_eq!(ack.address, LEASE.client);
+    }
+
+    #[test]
+    fn the_lease_names_no_router_or_dns_server() {
+        let offer = serve(&build_message(XID, MAC, None), &LEASE).unwrap();
+        let parsed = parse_reply(&offer, XID, MAC).unwrap();
+        assert_eq!((parsed.router, parsed.dns), (None, None));
+    }
+
+    #[test]
+    fn another_address_is_refused_and_another_server_is_ignored() {
+        let elsewhere = Ipv4Addr::new(10, 0, 0, 9);
+        let request = build_message(XID, MAC, Some((elsewhere, LEASE.server)));
+        let nak = parse_reply(&serve(&request, &LEASE).unwrap(), XID, MAC).unwrap();
+        assert_eq!(nak.kind, MessageType::Nak);
+        assert_eq!(nak.address, Ipv4Addr::UNSPECIFIED);
+
+        let other_server = build_message(XID, MAC, Some((LEASE.client, elsewhere)));
+        assert_eq!(serve(&other_server, &LEASE), None);
+    }
+
+    #[test]
+    fn a_renewal_by_ciaddr_is_acknowledged() {
+        let mut renewal = vec![0u8; OPTIONS_START];
+        renewal[0] = OP_REQUEST;
+        renewal[1] = HTYPE_ETHERNET;
+        renewal[2] = MAC_LEN;
+        renewal[4..8].copy_from_slice(&XID.to_be_bytes());
+        renewal[12..16].copy_from_slice(&LEASE.client.octets());
+        renewal[28..34].copy_from_slice(&MAC);
+        renewal[236..240].copy_from_slice(&COOKIE);
+        renewal.extend([OPTION_MESSAGE_TYPE, 1, MessageType::Request as u8, OPTION_END]);
+        let ack = parse_reply(&serve(&renewal, &LEASE).unwrap(), XID, MAC).unwrap();
+        assert_eq!(ack.kind, MessageType::Ack);
+    }
+
+    #[test]
+    fn the_server_survives_truncated_input() {
+        let message = build_message(XID, MAC, None);
+        for length in 0..message.len() {
+            let _ = serve(&message[..length], &LEASE);
+        }
+        assert_eq!(serve(&reply_bytes(2, XID, MAC), &LEASE), None);
     }
 
     #[test]

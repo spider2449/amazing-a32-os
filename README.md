@@ -193,6 +193,29 @@ not killed. 65 MB went to swap, and zram used at most 3.1 MB of RAM for it. That
 memory was repeated text, which compresses far better than real program memory, so
 this shows swap works, not how much it holds.
 
+## USB network
+
+`usbnet on` adds a network adapter next to the serial port on the USB cable, and
+`usbnet off` removes it. The choice is kept in `/data/a32/usb-network`. It is off by
+default, because the phone then has another USB product ID (`0E8D:2099`) and Windows
+gives its serial port another number: COM5 here instead of COM3, so scripts need
+`-Port COM5` while it is on. Every start begins with the serial port alone, and adds
+the adapter once `/data` is mounted, so a fault here cannot take away the console.
+
+The phone is `192.168.42.1` on interface `rndis0`, and a small DHCP server in the init
+gives the computer `192.168.42.2`. The lease names no router or DNS server, so the
+computer keeps its own internet connection, and the phone does not reach the internet
+through the cable. The firewall needs one more rule for it, UDP port 67 on `rndis0`:
+SSH and the status page are already allowed from private addresses.
+
+`scripts/test-usbnet.ps1` checks this from Windows after `usbnet on`. On a RAM boot,
+with Windows 11 and its built-in driver, it passed for the serial port, adapter, DHCP
+lease, ping, SSH and default route, and 32 MiB over SSH took 2.7 s (11.9 MiB/s). The
+setting was kept across a restart, and `usbnet off` brought back COM3. Link-local
+addresses (`169.254.0.0/16`) answered ping but not SSH, because they are not in the
+firewall's private ranges. The driver takes no MAC address from `f_rndis/ethaddr`
+here: the adapter's address changes on each start.
+
 ## Firewall
 
 The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic
@@ -260,7 +283,7 @@ At 95 C on the CPU or 55 C on the battery the phone powers off. That has not bee
 tested, and neither has the cap at its real limit. With USB attached the phone starts
 again by itself after powering off.
 
-Not measured: USB networking and power use. Running on battery will not be tested, because the phone runs on USB power as a server.
+Not measured: power use. Running on battery will not be tested, because the phone runs on USB power as a server.
 
 ### Tuning
 
