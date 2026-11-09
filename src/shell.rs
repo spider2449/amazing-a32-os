@@ -26,6 +26,7 @@ const HELP: &str = "commands:
   wifi join SSID PASSPHRASE    join a WPA2 network and keep it for later starts;
                                use double quotes around a value with spaces
   wifi forget                  leave the network and erase its saved details
+  sensors                      read the accelerometer, light and proximity
   usbnet                       show the USB network state
   usbnet on|off                add or remove a network adapter on the USB cable,
                                kept for later starts; the serial port reconnects
@@ -78,6 +79,8 @@ pub trait Platform {
     fn bluetooth(&self, switch: Option<bool>) -> io::Result<String>;
     /// Saves or removes a BLE sensor, by its address as text.
     fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String>;
+    /// Reads the phone's own sensors and describes them.
+    fn phone_sensors(&self) -> io::Result<String>;
     /// Adds or removes the USB network adapter and keeps that choice, or with
     /// `None` describes it.
     fn usb_network(&self, switch: Option<bool>) -> io::Result<String>;
@@ -158,6 +161,7 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         ["bluetooth", "remove", address] => {
             platform.bluetooth_sensor(false, address).and_then(|text| writeln!(out, "{text}"))
         }
+        ["sensors"] => platform.phone_sensors().and_then(|text| writeln!(out, "{text}")),
         ["usbnet"] => platform.usb_network(None).and_then(|text| writeln!(out, "{text}")),
         ["usbnet", "on"] => platform.usb_network(Some(true)).and_then(|text| writeln!(out, "{text}")),
         ["usbnet", "off"] => platform.usb_network(Some(false)).and_then(|text| writeln!(out, "{text}")),
@@ -307,6 +311,10 @@ mod tests {
             Ok(format!("usbnet {switch:?}"))
         }
 
+        fn phone_sensors(&self) -> io::Result<String> {
+            Ok("phone sensors".into())
+        }
+
         fn photo(&self, camera: &str, path: &str) -> io::Result<String> {
             Ok(format!("photo {camera} {path}"))
         }
@@ -375,6 +383,12 @@ mod tests {
         assert!(session("bluetooth add 58:2d:34:36:74:93\n").0.contains("sensor add=true 58:2d:34:36:74:93"));
         assert!(session("bluetooth remove 58:2d:34:36:74:93\n").0.contains("sensor add=false 58:2d:34:36:74:93"));
         assert!(session("bluetooth add\n").0.contains("unknown command"));
+    }
+
+    #[test]
+    fn sensors_takes_no_arguments() {
+        assert!(session("sensors\n").0.contains("phone sensors"));
+        assert!(session("sensors now\n").0.contains("unknown command"));
     }
 
     #[test]

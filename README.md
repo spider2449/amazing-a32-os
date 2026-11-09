@@ -270,6 +270,30 @@ above that only a weak signal was tried. Full-scale input at 12 dB was not tried
 Headphones, the earpiece, a second
 microphone and calls were not tested.
 
+## Phone sensors
+
+`sensors` on the console and `/sensors.json` on the status page read the phone's own
+accelerometer (MXC400X) and its light and proximity sensor (AP3426). A reading takes
+about 2 s, because light and proximity are switched on one at a time: with both on,
+light read lower and less steadily. BLE sensors are separate, under `bluetooth`.
+
+| Value | Result |
+|---|---|
+| Acceleration X, Y | Included gravity: Y 9.65 m/s² standing on its charging port, X 9.54 m/s² on a long edge |
+| Acceleration Z | Not available |
+| Light | The driver's raw number, not lux: 24 to 40 indoors, 0 when covered |
+| Proximity | Raw: at most 15 with nothing near, about 600 with a finger over the sensor. `near` is 300 or more |
+
+The driver always returns 0 for Z, through its data ioctl and its input events. Byte 2
+of `GSENSOR_IOCTL_READ_RAW_DATA` does follow tilt, but it holds only the low 8 bits. It
+wraps about once per g, and with no acceleration on Z it read `0x26` standing and
+`0x1D` on an edge. The phone also has no `i2c-dev` to read the chip directly. So Z is
+reported as unknown instead of a guess.
+
+The kernel has no bound driver for the gyro and compass (`gyro`, `msensor`), so
+whether this phone has them is unknown. A bright light on the light sensor was not
+tried. `scripts/test-sensors.ps1` prints readings while the phone is moved by hand.
+
 ## Firewall
 
 The init sets the firewall with the stock `iptables` before Wi-Fi starts. Incoming traffic

@@ -27,6 +27,8 @@ pub enum Route {
     Page,
     Json,
     Bluetooth,
+    /// A new reading of the phone's own sensors.
+    Sensors,
     /// A new photo from the named camera, "rear" or "front".
     Photo(&'static str),
     /// Live video from the named camera, as MJPEG.
@@ -54,6 +56,7 @@ pub fn route(request: &str) -> Route {
         "/" | "/index.html" => Route::Page,
         "/status.json" => Route::Json,
         "/bluetooth.json" => Route::Bluetooth,
+        "/sensors.json" => Route::Sensors,
         "/camera/rear.jpg" => Route::Photo("rear"),
         "/camera/front.jpg" => Route::Photo("front"),
         "/camera/rear.mjpg" => Route::Live("rear"),
@@ -206,7 +209,7 @@ pre {{ margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6
 <body>
 <main>
 <h1>Amazing A32</h1>
-<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a> · photo: <a href=\"/camera/rear.jpg\">rear</a>, <a href=\"/camera/front.jpg\">front</a> · live: <a href=\"/camera/rear.mjpg\">rear</a>, <a href=\"/camera/front.mjpg\">front</a></p>
+<p>{} · refreshes every {REFRESH_SECONDS} s · <a href=\"/status.json\">JSON</a> · <a href=\"/bluetooth.json\">Bluetooth devices</a> · <a href=\"/sensors.json\">phone sensors</a> · photo: <a href=\"/camera/rear.jpg\">rear</a>, <a href=\"/camera/front.jpg\">front</a> · live: <a href=\"/camera/rear.mjpg\">rear</a>, <a href=\"/camera/front.mjpg\">front</a></p>
 <table>
 {table}</table>
 {sensor_section}<h2>Log, newest last</h2>
@@ -358,6 +361,7 @@ mod tests {
         assert_eq!(route("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Route::Page);
         assert_eq!(route("GET /index.html HTTP/1.0\r\n\r\n"), Route::Page);
         assert_eq!(route("GET /status.json?x=1 HTTP/1.1\r\n\r\n"), Route::Json);
+        assert_eq!(route("GET /sensors.json HTTP/1.1\r\n\r\n"), Route::Sensors);
         assert_eq!(route("GET /camera/rear.jpg HTTP/1.1\r\n\r\n"), Route::Photo("rear"));
         assert_eq!(route("GET /camera/front.jpg?t=1 HTTP/1.1\r\n\r\n"), Route::Photo("front"));
         assert_eq!(route("GET /camera/side.jpg HTTP/1.1\r\n\r\n"), Route::NotFound);

@@ -25,6 +25,8 @@ mod properties;
 
 #[cfg(any(target_os = "linux", test))]
 mod audio;
+#[cfg(any(target_os = "linux", test))]
+mod phone_sensors;
 #[cfg(target_os = "linux")]
 mod camera_window;
 #[cfg(target_os = "linux")]

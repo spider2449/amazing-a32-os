@@ -965,6 +965,11 @@ fn serve_web(mut stream: TcpStream) -> io::Result<()> {
             drop(state);
             web::response("200 OK", "application/json", &body)
         }
+        // Takes about 2 s, during which other requests wait.
+        Route::Sensors => match crate::phone_sensors::read() {
+            Ok(reading) => web::response("200 OK", "application/json", &reading.json()),
+            Err(err) => web::response("503 Service Unavailable", "text/plain; charset=utf-8", &format!("{err}\n")),
+        },
         // Takes a second or two, during which other requests wait.
         Route::Photo(camera) => match take_photo(camera) {
             Ok(photo) => web::response_bytes("200 OK", "image/jpeg", &photo.jpeg),
@@ -2942,6 +2947,10 @@ impl Platform for KernelPlatform {
 
     fn bluetooth_sensor(&self, add: bool, address: &str) -> io::Result<String> {
         change_saved_sensor(add, address)
+    }
+
+    fn phone_sensors(&self) -> io::Result<String> {
+        crate::phone_sensors::read().map(|reading| reading.text())
     }
 
     fn usb_network(&self, switch: Option<bool>) -> io::Result<String> {
