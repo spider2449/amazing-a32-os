@@ -307,6 +307,9 @@ const SENSOR_HISTORY: &str = "/data/a32/sensors.csv";
 const SENSOR_HISTORY_OLD: &str = "/data/a32/sensors.csv.1";
 const SENSOR_HISTORY_LIMIT: u64 = 1024 * 1024;
 const SENSOR_HISTORY_INTERVAL: Duration = Duration::from_secs(300);
+const PHONE_SENSOR_HISTORY: &str = "/data/a32/phone-sensors.csv";
+const PHONE_SENSOR_HISTORY_OLD: &str = "/data/a32/phone-sensors.csv.1";
+const PHONE_SENSOR_FIRST_RECORD: Duration = Duration::from_secs(30);
 // The saved sensors, one address per line.
 const SAVED_SENSORS: &str = "/data/a32/bluetooth-sensors";
 /// The password for the cameras on the status page; without it they are off.
@@ -1296,15 +1299,35 @@ fn save_sensor_history(since: Duration) -> io::Result<()> {
     if lines.is_empty() {
         return Ok(());
     }
-    if fs::metadata(SENSOR_HISTORY).is_ok_and(|meta| meta.len() >= SENSOR_HISTORY_LIMIT) {
-        fs::rename(SENSOR_HISTORY, SENSOR_HISTORY_OLD)?;
+    append_history(SENSOR_HISTORY, SENSOR_HISTORY_OLD, sensors::CSV_HEADER, &lines)
+}
+
+/// Appends rows to a CSV file, moving it aside first once it reaches the limit.
+fn append_history(path: &str, old: &str, header: &str, lines: &str) -> io::Result<()> {
+    if fs::metadata(path).is_ok_and(|meta| meta.len() >= SENSOR_HISTORY_LIMIT) {
+        fs::rename(path, old)?;
     }
-    let new = !Path::new(SENSOR_HISTORY).exists();
-    let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(SENSOR_HISTORY)?;
+    let new = !Path::new(path).exists();
+    let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
     if new {
-        file.write_all(sensors::CSV_HEADER.as_bytes())?;
+        file.write_all(header.as_bytes())?;
     }
     file.write_all(lines.as_bytes())
+}
+
+/// Records the phone's own sensors, soon after the start and then at each interval.
+fn phone_sensor_history() {
+    thread::sleep(PHONE_SENSOR_FIRST_RECORD);
+    loop {
+        let recorded = crate::phone_sensors::read().and_then(|reading| {
+            let line = reading.csv_line(&wall_clock_text());
+            append_history(PHONE_SENSOR_HISTORY, PHONE_SENSOR_HISTORY_OLD, crate::phone_sensors::CSV_HEADER, &line)
+        });
+        if let Err(err) = recorded {
+            log(&format!("sensors: not recorded: {err}"));
+        }
+        thread::sleep(SENSOR_HISTORY_INTERVAL);
+    }
 }
 
 /// The end of the persistent log, or of this session's log if /data is not mounted.
@@ -2092,6 +2115,9 @@ fn storage_and_network() {
             }
             if let Err(err) = crate::audio::install() {
                 log(&format!("audio: scripts not installed: {err}"));
+            }
+            if let Err(err) = thread::Builder::new().spawn(phone_sensor_history) {
+                log(&format!("sensors: thread failed: {err}"));
             }
             if let Err(err) = restore_wifi_calibration() {
                 log(&format!("wifi: no calibration from nvdata: {err}"));

@@ -277,6 +277,10 @@ accelerometer (MXC400X) and its light and proximity sensor (AP3426). A reading t
 about 2 s, because light and proximity are switched on one at a time: with both on,
 light read lower and less steadily. BLE sensors are separate, under `bluetooth`.
 
+A reading is appended to `/data/a32/phone-sensors.csv` 30 s after the start and every
+5 minutes after that. The file moves to `phone-sensors.csv.1` at 1 MiB, about 70 days.
+Acceleration is in m/s², and the file has no column for Z.
+
 | Value | Result |
 |---|---|
 | Acceleration X, Y | Included gravity: Y 9.65 m/s² standing on its charging port, X 9.54 m/s² on a long edge |

@@ -27,6 +27,8 @@ use std::time::Duration;
 // In a test, a finger over the sensor read about 600 and nothing near it at most 15.
 const NEAR_THRESHOLD: u32 = 300;
 
+pub const CSV_HEADER: &str = "time,acceleration_x,acceleration_y,light_raw,proximity_raw\n";
+
 #[derive(Debug, PartialEq)]
 pub struct Reading {
     /// Acceleration in mm/s², which includes gravity.
@@ -50,6 +52,17 @@ impl Reading {
             self.light,
             self.proximity,
             if self.near() { "near" } else { "far" },
+        )
+    }
+
+    /// One row of the history, which has no column for Z.
+    pub fn csv_line(&self, time: &str) -> String {
+        format!(
+            "{time},{:.3},{:.3},{},{}\n",
+            f64::from(self.x) / 1000.0,
+            f64::from(self.y) / 1000.0,
+            self.light,
+            self.proximity,
         )
     }
 
@@ -171,6 +184,13 @@ mod tests {
 
     fn reading(proximity: u32) -> Reading {
         Reading { x: -574, y: 9650, light: 28, proximity }
+    }
+
+    #[test]
+    fn a_csv_row_matches_the_header() {
+        let line = reading(5).csv_line("2026-11-09T12:00:00Z");
+        assert_eq!(line, "2026-11-09T12:00:00Z,-0.574,9.650,28,5\n");
+        assert_eq!(line.split(',').count(), CSV_HEADER.split(',').count());
     }
 
     #[test]
