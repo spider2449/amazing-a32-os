@@ -253,7 +253,7 @@ waits for the stream to run and the very start of a sound may be cut. The microp
 goes through preamp 1 and ADC 1, at 18 dB.
 
 `scripts/test-audio.sh` plays a quiet 1 kHz tone and records it. It passed on a RAM
-boot: the 1 kHz level at the microphone rose by about 60 dB during the tone. It also
+boot and then from flash: the 1 kHz level at the microphone rose by about 60 dB during the tone. It also
 checks streaming, that no PCM node is left, and that direct capture is refused. The
 tone (-26 dBFS, speaker gain 0 dB) was also heard from the phone, faintly. Beyond that, this
 was measured with the microphone: sound quality and the highest safe volume were not
