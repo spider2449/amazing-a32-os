@@ -12,6 +12,11 @@ const KEYBOARD_HEIGHT: u32 = 300;
 const TRAY_HEIGHT: u32 = 34;
 const KEYBOARD_FONT: &str = "DejaVu Sans:bold:size=12";
 
+/// The script that opens the init's camera window, and that window's class, which
+/// the tray's task list shows as its name.
+pub const CAMERA_SCRIPT: &str = "/run/a32-camera";
+pub const CAMERA_CLASS: &str = "Camera";
+
 /// Where the keyboard's top edge is on a screen this high.
 fn keyboard_top(height: u32) -> u32 {
     height.saturating_sub(TRAY_HEIGHT + KEYBOARD_HEIGHT)
@@ -43,6 +48,7 @@ pub fn keyboard_script(width: u32, height: u32) -> String {
 ///   could not be closed.
 /// - Every window of Alpine's groups keeps its title, with its close button.
 ///   Alpine's xclock group had none, for that window above.
+/// - The init's camera window opens maximized.
 pub fn for_touch(text: &str, height: u32) -> Option<String> {
     const MENU: &str = "<RootMenu onroot=\"";
     let start = text.find(MENU)? + MENU.len();
@@ -91,7 +97,9 @@ pub fn for_touch(text: &str, height: u32) -> Option<String> {
         format!("y:{}", keyboard_top(height)),
     ];
     let options: String = options.iter().map(|option| format!("<Option>{option}</Option>")).collect();
-    let group = format!("{added_focus}<Group><Class>{KEYBOARD_CLASS}</Class>{options}</Group>\n</JWM>");
+    // The camera window fills the space above the tray.
+    let camera = format!("<Group><Class>{CAMERA_CLASS}</Class><Option>maximized</Option></Group>");
+    let group = format!("{added_focus}<Group><Class>{KEYBOARD_CLASS}</Class>{options}</Group>{camera}\n</JWM>");
     let close = changed.rfind("</JWM>")?;
     changed.replace_range(close..close + "</JWM>".len(), &group);
     Some(changed)
@@ -118,6 +126,10 @@ fn with_musl_clock_format(text: &str) -> String {
 const EXTRA_PROGRAMS: &[(&str, &str, &str)] = &[
     ("web-browser", "Browser", "netsurf"),
     ("system-file-manager", "Files", "pcmanfm"),
+    // The init draws this window itself; see `camera_window`. Named by its own
+    // path: `sh` would not count as installed, since Alpine's /bin/sh is a link
+    // that leads outside the chroot when followed from the init.
+    ("camera-photo", "Camera", CAMERA_SCRIPT),
 ];
 
 /// Alpine's settings with `EXTRA_PROGRAMS` at the end of the menu named
@@ -353,6 +365,7 @@ mod tests {
             "            <Program icon=\"system-file-manager\" label=\"ROX\">rox ~</Program>\n\
              \x20           <Program icon=\"web-browser\" label=\"Browser\">netsurf</Program>\n\
              \x20           <Program icon=\"system-file-manager\" label=\"Files\">pcmanfm</Program>\n\
+             \x20           <Program icon=\"camera-photo\" label=\"Camera\">/run/a32-camera</Program>\n\
              \x20       </Menu>\n"
         ));
         // Shown only when installed.
@@ -417,7 +430,8 @@ mod tests {
         let changed = for_touch(ALPINE, 854).unwrap();
         assert!(changed.contains("<Class>svkbd</Class>"));
         assert!(changed.contains("<Option>nofocus</Option><Option>layer:above</Option>"));
-        assert!(changed.contains("<Option>y:520</Option></Group>\n</JWM>"));
+        assert!(changed.contains("<Option>y:520</Option></Group><Group>"));
+        assert!(changed.contains("<Group><Class>Camera</Class><Option>maximized</Option></Group>\n</JWM>"));
         assert!(changed.contains(
             r#"root:3</TrayButton><TrayButton label="KB">exec:/bin/sh /run/a32-keyboard</TrayButton>"#
         ));

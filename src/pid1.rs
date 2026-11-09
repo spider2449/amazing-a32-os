@@ -2980,7 +2980,7 @@ impl Platform for KernelPlatform {
 const PHOTO_QUALITY: u32 = 85;
 
 /// Takes a photo with the named camera ("rear" or "front") and logs the result.
-fn take_photo(name: &str) -> io::Result<camera::Photo> {
+pub(crate) fn take_photo(name: &str) -> io::Result<camera::Photo> {
     let camera = camera::by_name(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("no camera named {name}")))?;
     match camera::take(camera, PHOTO_QUALITY) {

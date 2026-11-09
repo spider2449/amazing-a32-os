@@ -24,6 +24,8 @@ mod photo;
 mod properties;
 
 #[cfg(target_os = "linux")]
+mod camera_window;
+#[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(any(target_os = "linux", test))]
 mod jwmrc;
@@ -68,6 +70,8 @@ mod watchdog;
 mod web;
 #[cfg(any(target_os = "linux", test))]
 mod wifi;
+#[cfg(any(target_os = "linux", test))]
+mod x11;
 
 fn main() {
     #[cfg(target_os = "linux")]

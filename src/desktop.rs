@@ -3,11 +3,13 @@
 //! touches, and draws again once either program ends.
 
 use crate::alpine;
+use crate::camera_window;
 use crate::jwmrc;
 use crate::pid1::log;
 use std::fs;
 use std::io;
 use std::os::raw::c_int;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
@@ -37,7 +39,7 @@ const CONFIG: &str = "/run/a32-xorg.conf";
 const XORG_LOG: &str = "/run/xorg.log";
 const SESSION_LOG: &str = "/run/desktop.log";
 const DISPLAY: &str = ":0";
-const SOCKET: &str = "/data/alpine/tmp/.X11-unix/X0";
+pub(crate) const SOCKET: &str = "/data/alpine/tmp/.X11-unix/X0";
 const LOCK: &str = "/data/alpine/tmp/.X0-lock";
 const SYSTEM_JWMRC: &str = "/data/alpine/etc/system.jwmrc";
 const USER_JWMRC: &str = "/data/alpine/root/.jwmrc";
@@ -96,6 +98,14 @@ pub fn start(width: u32, height: u32) -> io::Result<Session> {
             return Err(io::Error::other(format!("the X server did not start, see {XORG_LOG}")));
         }
         thread::sleep(CHECK);
+    }
+    // The menu's Camera entry runs this script, which asks the init for the window.
+    // It is written first, since the menu lists only programs that exist.
+    let script = fs::write(camera_window::SCRIPT, camera_window::script())
+        .and_then(|()| fs::set_permissions(camera_window::SCRIPT, fs::Permissions::from_mode(0o755)));
+    match script {
+        Ok(()) => camera_window::listen(),
+        Err(err) => log(&format!("desktop: {}: {err}", camera_window::SCRIPT)),
     }
     let window_manager =
         match alpine::spawn(WINDOW_MANAGER, &window_manager_arguments(height), &[("DISPLAY", DISPLAY)], SESSION_LOG) {
