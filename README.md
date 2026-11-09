@@ -279,7 +279,8 @@ light read lower and less steadily. BLE sensors are separate, under `bluetooth`.
 
 A reading is appended to `/data/a32/phone-sensors.csv` 30 s after the start and every
 5 minutes after that. The file moves to `phone-sensors.csv.1` at 1 MiB, about 70 days.
-Acceleration is in m/s², and the file has no column for Z.
+Acceleration is in m/s², and the file has no column for Z. Tested on a RAM boot, then
+flashed: the phone booted from it, the first row came 30 s after the start and the next 302 s later.
 
 | Value | Result |
 |---|---|
