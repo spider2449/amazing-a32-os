@@ -211,7 +211,7 @@ SSH and the status page are already allowed from private addresses.
 `scripts/test-usbnet.ps1` checks this from Windows after `usbnet on`. On a RAM boot,
 with Windows 11 and its built-in driver, it passed for the serial port, adapter, DHCP
 lease, ping, SSH and default route, and 32 MiB over SSH took 2.7 s (11.9 MiB/s). The
-setting was kept across a restart, and `usbnet off` brought back COM3. Link-local
+setting was kept across a restart, and `usbnet off` brought back COM3. Then flashed: the phone booted from it and the same checks passed, with 32 MiB in 2.7 s. Link-local
 addresses (`169.254.0.0/16`) answered ping but not SSH, because they are not in the
 firewall's private ranges. The driver takes no MAC address from `f_rndis/ethaddr`
 here: the adapter's address changes on each start.
