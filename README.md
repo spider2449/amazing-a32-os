@@ -700,7 +700,8 @@ restart. The CPU bar is the busy share of all cores over the last second, from
 with one screenshot two minutes after the start: the clock showed the local time, the
 bars and the first samples of each graph showed values, and the CPU bar read 5% while
 the load average read 7.23, so on this kernel the load average says little about how
-busy the CPU is. Not yet checked: a full hour of graphs, and the orange and red bars,
+busy the CPU is. Then flashed: the phone booted from it, SSH answered 36 s after the
+start, and the page showed the clock, the bars and the first sample. Not yet checked: a full hour of graphs, and the orange and red bars,
 which only a unit test has drawn. Its other pages restart or
 power off the phone, change settings, scan for and join a WPA2 network with an on-screen keyboard, and turn
 the BLE scan on or off, take photos, show live video, and give a Linux shell. The Bluetooth page shows the
