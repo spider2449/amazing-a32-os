@@ -27,7 +27,7 @@ use crate::shell::{self, Platform};
 use crate::settings::Settings;
 use crate::sntp;
 use crate::thermal::{self, Action as ThermalAction};
-use crate::ui::{self, Request, SensorRow, Snapshot, Ui};
+use crate::ui::{self, Request, Sample, SensorRow, Snapshot, Ui};
 use crate::usb;
 use crate::watchdog::{self, NetworkWatch, Service};
 use crate::web::{self, Route};
@@ -693,6 +693,12 @@ const POWER_LOG_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Set while the charger is attached but charging has stopped.
 static CHARGING_STALLED: AtomicBool = AtomicBool::new(false);
+/// For the home page's CPU bar: the counters and the time of the last reading, and
+/// the percentage it gave. The web page asks too, so a reading is kept for a while.
+static CPU_METER: Mutex<Option<(CpuTimes, Instant, Option<u8>)>> = Mutex::new(None);
+const CPU_METER_INTERVAL: Duration = Duration::from_millis(900);
+/// For the home page's graphs, the oldest sample first.
+static METER_HISTORY: Mutex<std::collections::VecDeque<Sample>> = Mutex::new(std::collections::VecDeque::new());
 
 const SYSLOG_ACTION_READ_ALL: c_int = 3;
 const SYSLOG_ACTION_CONSOLE_LEVEL: c_int = 8;
@@ -1315,6 +1321,78 @@ fn append_history(path: &str, old: &str, header: &str, lines: &str) -> io::Resul
     file.write_all(lines.as_bytes())
 }
 
+/// The kernel's CPU time counters, summed over all cores: all of it, and the idle part.
+#[derive(Clone, Copy)]
+struct CpuTimes {
+    total: u64,
+    idle: u64,
+}
+
+/// Parses the first line of `/proc/stat`. Waiting for I/O counts as idle.
+fn parse_cpu_times(stat: &str) -> Option<CpuTimes> {
+    let values: Vec<u64> = stat
+        .lines()
+        .next()?
+        .strip_prefix("cpu ")?
+        .split_whitespace()
+        .take(8)
+        .map(|field| field.parse().ok())
+        .collect::<Option<_>>()?;
+    // user, nice, system, idle, iowait, irq, softirq, steal. Old kernels end at idle.
+    let idle = values.get(3)? + values.get(4).copied().unwrap_or(0);
+    Some(CpuTimes { total: values.iter().sum(), idle })
+}
+
+/// The busy share between two readings, in percent.
+fn cpu_busy_percent(earlier: CpuTimes, later: CpuTimes) -> Option<u8> {
+    let total = later.total.checked_sub(earlier.total).filter(|&total| total > 0)?;
+    let idle = later.idle.saturating_sub(earlier.idle).min(total);
+    Some(((total - idle) * 100 / total) as u8)
+}
+
+fn read_cpu_times() -> Option<CpuTimes> {
+    parse_cpu_times(&fs::read_to_string("/proc/stat").ok()?)
+}
+
+/// The CPU's busy share since the last call, or the last answer if that call was
+/// less than a second ago.
+fn cpu_percent_now() -> Option<u8> {
+    let mut meter = CPU_METER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
+    if let Some((_, read, percent)) = *meter {
+        if now.duration_since(read) < CPU_METER_INTERVAL {
+            return percent;
+        }
+    }
+    let times = read_cpu_times()?;
+    let percent = meter.and_then(|(earlier, _, _)| cpu_busy_percent(earlier, times));
+    *meter = Some((times, now, percent));
+    percent
+}
+
+/// Keeps the last hour of the home page's graphs, in memory only. It runs with
+/// the screen off too, so the graphs are full when the screen turns on.
+fn meter_history() {
+    let interval = Duration::from_secs(ui::HISTORY_INTERVAL_SECONDS);
+    let mut earlier = read_cpu_times();
+    loop {
+        thread::sleep(interval);
+        let later = read_cpu_times();
+        let cpu = earlier.zip(later).and_then(|(earlier, later)| cpu_busy_percent(earlier, later)).unwrap_or(0);
+        earlier = later;
+        let sample = Sample {
+            cpu,
+            temperature: zone_temperature(CPU_ZONE).map_or(0, |value| (value / 1000).clamp(-128, 127) as i8),
+            battery: fs::read_to_string(BATTERY_CAPACITY).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0),
+        };
+        let mut history = METER_HISTORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if history.len() >= ui::HISTORY_SAMPLES {
+            history.pop_front();
+        }
+        history.push_back(sample);
+    }
+}
+
 /// Records the phone's own sensors, soon after the start and then at each interval.
 fn phone_sensor_history() {
     thread::sleep(PHONE_SENSOR_FIRST_RECORD);
@@ -1696,6 +1774,12 @@ fn snapshot() -> Snapshot {
         .unwrap_or(0.0);
     let seconds = uptime as u64;
     let memory = read("/proc/meminfo");
+    let kibibytes = |name: &str| {
+        memory
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.split_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     let megabytes = |name: &str| {
         memory
             .lines()
@@ -1724,6 +1808,12 @@ fn snapshot() -> Snapshot {
         cpu_temperature: degrees(CPU_ZONE),
         memory: format!("{} of {} MB free", megabytes("MemAvailable:"), megabytes("MemTotal:")),
         disk: free_disk_text(),
+        unix_time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs()),
+        cpu_percent: cpu_percent_now(),
+        memory_percent: used_percent(kibibytes("MemAvailable:"), kibibytes("MemTotal:")),
+        disk_percent: disk_bytes().and_then(|(free, total)| used_percent(free, total)),
+        battery_percent: read(BATTERY_CAPACITY).trim().parse().ok(),
+        history: METER_HISTORY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().copied().collect(),
         battery: if CHARGING_STALLED.load(Ordering::Acquire) {
             format!("{}% NOT CHARGING", read(BATTERY_CAPACITY).trim())
         } else {
@@ -1836,20 +1926,30 @@ fn change_saved_sensor(add: bool, text: &str) -> io::Result<String> {
 
 /// Describes the free space on /data.
 fn free_disk_text() -> String {
+    match disk_bytes() {
+        Some((free, total)) => format!("{} of {} MB free", free / (1024 * 1024), total / (1024 * 1024)),
+        None => "not mounted".to_string(),
+    }
+}
+
+/// The free and the whole space of /data in bytes, once it is mounted.
+fn disk_bytes() -> Option<(u64, u64)> {
     // musl's 32-bit `struct statvfs`: `f_bsize` and `f_frsize` are 32 bits, then
     // `f_blocks`, `f_bfree` and `f_bavail` are 64 bits. This buffer holds all of it.
     let mut fields = [0u64; 16];
-    let Ok(path) = cstring(DATA_DIR) else {
-        return "?".to_string();
-    };
+    let path = cstring(DATA_DIR).ok()?;
     // SAFETY: `path` is a valid string, and `fields` is larger than the structure, and
     // aligned for it, for the call duration.
     if !DATA_READY.load(Ordering::Acquire) || unsafe { statvfs(path.as_ptr(), fields.as_mut_ptr().cast()) } != 0 {
-        return "not mounted".to_string();
+        return None;
     }
     let block_size = fields[0] >> 32;
-    let mebibytes = |blocks: u64| blocks * block_size / (1024 * 1024);
-    format!("{} of {} MB free", mebibytes(fields[3]), mebibytes(fields[1]))
+    Some((fields[3] * block_size, fields[1] * block_size))
+}
+
+/// The share in use, given what is free and the whole.
+fn used_percent(free: u64, total: u64) -> Option<u8> {
+    (total > 0).then(|| (total.saturating_sub(free) * 100 / total) as u8)
 }
 
 /// Does the panel's slow work, one request at a time.
@@ -2088,6 +2188,9 @@ fn run_power_key() -> io::Result<()> {
 /// Mounts /data, starts Wi-Fi, then keeps the network working. This runs apart from
 /// the console, so that a slow or stuck step cannot take away the way to fastboot.
 fn storage_and_network() {
+    if let Err(err) = thread::Builder::new().spawn(meter_history) {
+        log(&format!("panel: graph thread failed: {err}"));
+    }
     if let Err(err) = fs::write(CPU_IO_IS_BUSY, "1") {
         log(&format!("tuning: io_is_busy not set: {err}"));
     }

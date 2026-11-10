@@ -12,6 +12,13 @@ const BUTTON: Rgb = Rgb(44, 58, 80);
 const PRESSED: Rgb = Rgb(240, 150, 60);
 const MUTED: Rgb = Rgb(150, 165, 180);
 const DANGER: Rgb = Rgb(170, 50, 50);
+const GOOD: Rgb = Rgb(70, 180, 120);
+const TRACK: Rgb = Rgb(50, 64, 86);
+const GRAPH_FILL: Rgb = Rgb(40, 84, 96);
+const GRAPH_LINE: Rgb = Rgb(110, 210, 220);
+/// Before this time the clock was never set: 2020-01-01.
+const CLOCK_SET_AFTER: u64 = 1_577_836_800;
+const WEEKDAYS: [&str; 7] = ["THU", "FRI", "SAT", "SUN", "MON", "TUE", "WED"];
 
 const TEXT_LARGE: u32 = 4;
 const TEXT_MEDIUM: u32 = 3;
@@ -53,6 +60,14 @@ const SETTING_BUTTONS: Rect = Rect { x: 240, y: 24, width: WIDTH - MARGIN - 240,
 /// Where the camera page shows its photo: a 3:4 portrait photo fills it.
 const PHOTO_AREA: Rect = Rect { x: 0, y: 92, width: WIDTH, height: 640 };
 const HEIGHT: u32 = 854;
+/// The home page, from the top: the clock, four bars, three graphs, the network.
+const VALUE_LEFT: u32 = 100;
+const BAR_TOP: u32 = 184;
+const BAR_STEP: u32 = 46;
+const GRAPH_TOP: u32 = 372;
+const GRAPH_STEP: u32 = 86;
+const GRAPH_HEIGHT: u32 = 80;
+const NETWORK_TOP: u32 = 640;
 
 // The console page: a header with two buttons, the terminal, and a keyboard of
 // five short rows at the bottom, which can be hidden to show more lines.
@@ -97,6 +112,32 @@ pub struct Snapshot {
     pub bluetooth_saved: Vec<SensorRow>,
     pub bluetooth_candidates: Vec<SensorRow>,
     pub bluetooth_nearby: Vec<String>,
+    /// For the home page's clock, bars and graphs. Seconds since 1970 in UTC, or 0
+    /// if the clock is not set; the percentages are of what is in use, except the
+    /// battery's, which is its charge.
+    pub unix_time: u64,
+    pub cpu_percent: Option<u8>,
+    pub memory_percent: Option<u8>,
+    pub disk_percent: Option<u8>,
+    pub battery_percent: Option<u8>,
+    /// The oldest sample first, one every `HISTORY_INTERVAL_SECONDS`.
+    pub history: Vec<Sample>,
+}
+
+/// How many samples the home page's graphs show, and how far apart they are taken:
+/// together about one hour.
+pub const HISTORY_SAMPLES: usize = 224;
+pub const HISTORY_INTERVAL_SECONDS: u64 = 16;
+
+/// One point of the home page's graphs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sample {
+    /// Busy time over the interval before the sample, in percent.
+    pub cpu: u8,
+    /// The CPU's temperature in whole degrees Celsius.
+    pub temperature: i8,
+    /// The battery's charge in percent.
+    pub battery: u8,
 }
 
 /// A sensor as one row of the panel: its address, and the text to show.
@@ -1033,47 +1074,87 @@ impl Ui {
     }
 
     fn render_home(&self, canvas: &mut Canvas, status: &Snapshot) {
-        title(canvas, "AMAZING A32");
-        let groups: [(&str, u32, u32, &[(&str, &str)]); 3] = [
-            (
-                "NETWORK",
-                88,
-                206,
-                &[
-                    ("ADDR", &status.address),
-                    ("WI-FI", &status.network),
-                    ("SIGNAL", &status.signal),
-                    ("SSH", &status.ssh),
-                ],
-            ),
-            (
-                "SYSTEM",
-                310,
-                248,
-                &[
-                    ("UP", &status.uptime),
-                    ("LOAD", &status.load),
-                    ("CPU", &status.cpu_temperature),
-                    ("MEM", &status.memory),
-                    ("DISK", &status.disk),
-                ],
-            ),
-            (
-                "BATTERY",
-                574,
-                170,
-                &[("LEVEL", &status.battery), ("TEMP", &status.battery_temperature)],
-            ),
+        // A dashboard: a clock, bars for what is in use now, graphs of the last
+        // hour, and the network's state.
+        canvas.draw_text(MARGIN, 14, TEXT_MEDIUM, "AMAZING A32", ACCENT);
+        self.render_clock(canvas, status.unix_time);
+
+        // Each bar turns orange and then red as it nears its limit. For the
+        // battery the limit is empty, not full.
+        let level = |percent: Option<u8>| match percent {
+            Some(90..) => DANGER,
+            Some(75..) => ACCENT,
+            _ => GOOD,
+        };
+        let battery_level = match status.battery_percent {
+            Some(..=15) => DANGER,
+            Some(..=30) => ACCENT,
+            _ => GOOD,
+        };
+        let percent_text = |percent: Option<u8>| percent.map_or("?".to_string(), |value| format!("{value}%"));
+        let cpu = format!("{}  {}  {}", percent_text(status.cpu_percent), status.cpu_temperature, status.load);
+        let battery = format!("{}  {}", status.battery, status.battery_temperature);
+        let bars: [(&str, &str, Option<u8>, Rgb); 4] = [
+            ("CPU", &cpu, status.cpu_percent, level(status.cpu_percent)),
+            ("MEM", &status.memory, status.memory_percent, level(status.memory_percent)),
+            ("DISK", &status.disk, status.disk_percent, level(status.disk_percent)),
+            ("BAT", &battery, status.battery_percent, battery_level),
         ];
-        for (name, top, height, rows) in groups {
-            canvas.fill(Rect { x: 0, y: top, width: WIDTH, height }, PANEL);
-            canvas.draw_text(MARGIN, top + 12, TEXT_SMALL, name, ACCENT);
-            for (index, (label, value)) in rows.iter().enumerate() {
-                let y = top + 42 + index as u32 * 40;
-                canvas.draw_text(MARGIN, y + 4, TEXT_SMALL, label, MUTED);
-                canvas.draw_text(100, y, TEXT_MEDIUM, value, FOREGROUND);
-            }
+        canvas.fill(Rect { x: 0, y: BAR_TOP - 10, width: WIDTH, height: BAR_STEP * 4 + 12 }, PANEL);
+        for (index, (label, text, percent, color)) in bars.into_iter().enumerate() {
+            let y = BAR_TOP + index as u32 * BAR_STEP;
+            canvas.draw_text(MARGIN, y, TEXT_SMALL, label, MUTED);
+            canvas.draw_text(VALUE_LEFT, y, TEXT_SMALL, text, FOREGROUND);
+            let track = Rect { x: MARGIN, y: y + 22, width: WIDTH - MARGIN * 2, height: 12 };
+            canvas.fill(track, TRACK);
+            let filled = track.width * u32::from(percent.unwrap_or(0).min(100)) / 100;
+            canvas.fill(Rect { width: filled, ..track }, color);
         }
+
+        let graphs: [(&str, &str, fn(&Sample) -> i32, Option<(i32, i32)>); 3] = [
+            ("CPU", "%", |sample| i32::from(sample.cpu), Some((0, 100))),
+            ("TEMP", "C", |sample| i32::from(sample.temperature), None),
+            ("BAT", "%", |sample| i32::from(sample.battery), Some((0, 100))),
+        ];
+        for (index, (label, unit, value, range)) in graphs.into_iter().enumerate() {
+            let area = Rect { x: MARGIN, y: GRAPH_TOP + index as u32 * GRAPH_STEP, width: WIDTH - MARGIN * 2, height: GRAPH_HEIGHT };
+            let values: Vec<i32> = status.history.iter().map(value).collect();
+            render_graph(canvas, area, label, unit, &values, range);
+        }
+
+        let wifi = format!("{}  {}", status.network, status.signal);
+        let rows: [(&str, &str); 4] =
+            [("ADDR", &status.address), ("WI-FI", &wifi), ("SSH", &status.ssh), ("UP", &status.uptime)];
+        canvas.fill(Rect { x: 0, y: NETWORK_TOP - 10, width: WIDTH, height: 4 * 30 + 14 }, PANEL);
+        for (index, (label, value)) in rows.into_iter().enumerate() {
+            let y = NETWORK_TOP + index as u32 * 30;
+            canvas.draw_text(MARGIN, y, TEXT_SMALL, label, MUTED);
+            canvas.draw_text(VALUE_LEFT, y, TEXT_SMALL, value, FOREGROUND);
+        }
+    }
+
+    /// The time in the zone from the settings, with the date and weekday under it.
+    fn render_clock(&self, canvas: &mut Canvas, unix_time: u64) {
+        const CLOCK_SCALE: u32 = 10;
+        let area = Rect { x: 0, y: 56, width: WIDTH, height: CHAR_HEIGHT * CLOCK_SCALE };
+        let below = Rect { x: 0, y: 140, width: WIDTH, height: CHAR_HEIGHT * TEXT_SMALL };
+        // The upper limit keeps the date's arithmetic far from overflowing.
+        if !(CLOCK_SET_AFTER..CLOCK_SET_AFTER * 100).contains(&unix_time) {
+            canvas.draw_text_centered(area, CLOCK_SCALE, "--:--", MUTED);
+            canvas.draw_text_centered(below, TEXT_SMALL, "The clock is not set yet", MUTED);
+            return;
+        }
+        let offset = self.settings.utc_offset_hours();
+        let local = unix_time.saturating_add_signed(i64::from(offset) * 3600);
+        // "YYYY-MM-DDTHH:MM:SSZ": the same text as the log's, cut into its parts.
+        let text = crate::watchdog::utc_text(local);
+        let (Some(date), Some(time), Some(seconds)) = (text.get(0..10), text.get(11..16), text.get(17..19)) else {
+            return;
+        };
+        canvas.draw_text_centered(area, CLOCK_SCALE, time, FOREGROUND);
+        let weekday = WEEKDAYS[(local / 86400 % 7) as usize];
+        let zone = self.settings.value_text(Setting::TimeZone);
+        canvas.draw_text_centered(below, TEXT_SMALL, &format!("{date} {weekday}  :{seconds}  {zone}"), MUTED);
     }
 
     fn render_settings(&self, canvas: &mut Canvas) {
@@ -1201,6 +1282,38 @@ fn wrap(text: &str, columns: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// One graph of the home page: the newest sample at the right edge, each two pixels
+/// wide, with the latest, lowest and highest values in its top line. Without a
+/// fixed range the graph spans what the samples span, and at least 10 units.
+fn render_graph(canvas: &mut Canvas, area: Rect, label: &str, unit: &str, values: &[i32], range: Option<(i32, i32)>) {
+    const COLUMN: u32 = 2;
+    const HEADER: u32 = 22;
+    canvas.fill(area, PANEL);
+    canvas.draw_text(area.x + 6, area.y + 4, TEXT_SMALL, label, ACCENT);
+    let columns = (area.width / COLUMN) as usize;
+    let shown = &values[values.len().saturating_sub(columns)..];
+    let (Some(&last), Some(&lowest), Some(&highest)) = (shown.last(), shown.iter().min(), shown.iter().max()) else {
+        canvas.draw_text(area.x + 72, area.y + 4, TEXT_SMALL, "collecting...", MUTED);
+        return;
+    };
+    let summary = format!("{last}{unit}  {lowest}-{highest}");
+    canvas.draw_text(area.x + 72, area.y + 4, TEXT_SMALL, &summary, FOREGROUND);
+    let (bottom, top) = range.unwrap_or_else(|| {
+        let middle = (lowest + highest) / 2;
+        (lowest.min(middle - 5), highest.max(middle + 5))
+    });
+    let plot_height = area.height - HEADER - 2;
+    let span = (top - bottom).max(1) as u32;
+    let first_x = area.x + area.width - shown.len() as u32 * COLUMN;
+    for (index, &value) in shown.iter().enumerate() {
+        let scaled = (value.clamp(bottom, top) - bottom) as u32 * plot_height / span;
+        let x = first_x + index as u32 * COLUMN;
+        let y = area.y + area.height - scaled;
+        canvas.fill(Rect { x, y, width: COLUMN, height: scaled }, GRAPH_FILL);
+        canvas.fill(Rect { x, y: y - 2, width: COLUMN, height: 2 }, GRAPH_LINE);
+    }
 }
 
 fn title(canvas: &mut Canvas, text: &str) {
@@ -1854,6 +1967,40 @@ mod tests {
         let rows: Vec<Rect> = ui.buttons().iter().filter(|button| matches!(button.press, Press::Change(..))).map(|button| button.area).collect();
         assert_eq!(rows.len(), 2 * Setting::ALL.len());
         assert!(rows.iter().all(|area| !area.overlaps(OPEN_SETTINGS)));
+    }
+
+    #[test]
+    fn the_home_page_draws_full_bars_and_graphs() {
+        use crate::display::tests::rgba8888;
+        let mut canvas = Canvas::new(rgba8888());
+        let mut ui = Ui::default();
+        // More samples than fit, with values outside every range.
+        let history: Vec<Sample> = (0..HISTORY_SAMPLES * 2)
+            .map(|index| Sample { cpu: (index % 256) as u8, temperature: (index % 256) as u8 as i8, battery: 255 })
+            .collect();
+        let mut status = Snapshot {
+            unix_time: 1_794_300_000,
+            cpu_percent: Some(255),
+            memory_percent: Some(80),
+            disk_percent: None,
+            battery_percent: Some(10),
+            history,
+            ..Snapshot::default()
+        };
+        ui.render(&mut canvas, &status);
+        // One sample, a zone west of UTC, and a clock far outside any real date.
+        status.history.truncate(1);
+        ui.settings.step(Setting::TimeZone, false);
+        ui.render(&mut canvas, &status);
+        status.unix_time = u64::MAX;
+        ui.render(&mut canvas, &status);
+    }
+
+    #[test]
+    fn the_weekday_matches_the_date() {
+        // 1970-01-01 was a Thursday, and 2026-11-10 a Tuesday.
+        assert_eq!(WEEKDAYS[0], "THU");
+        assert_eq!(WEEKDAYS[(1_794_300_000u64 / 86400 % 7) as usize], "TUE");
     }
 
     #[test]

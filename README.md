@@ -690,7 +690,18 @@ the phone off. Without USB it stays off until the key starts it again.
 ## Touch panel
 
 The screen is a panel, drawn by the init with no other graphics software. The home page
-shows the address, Wi-Fi, SSH, CPU, memory, disk and battery. Its other pages restart or
+is a dashboard: a clock in the time zone from the settings, with the date and weekday;
+bars for the CPU, memory, disk and battery, which turn orange and then red near their
+limits; graphs of the last hour of CPU use, CPU temperature and battery charge; and the
+address, Wi-Fi, SSH and uptime. The graphs hold 224 samples, one every 16 seconds, kept
+in memory only and collected with the screen off too, so they start empty after a
+restart. The CPU bar is the busy share of all cores over the last second, from
+`/proc/stat`, with waiting for I/O counted as idle. Checked on a RAM boot on 2026-11-10
+with one screenshot two minutes after the start: the clock showed the local time, the
+bars and the first samples of each graph showed values, and the CPU bar read 5% while
+the load average read 7.23, so on this kernel the load average says little about how
+busy the CPU is. Not yet checked: a full hour of graphs, and the orange and red bars,
+which only a unit test has drawn. Its other pages restart or
 power off the phone, change settings, scan for and join a WPA2 network with an on-screen keyboard, and turn
 the BLE scan on or off, take photos, show live video, and give a Linux shell. The Bluetooth page shows the
 scan's state, up to 4 sensors with their values, and the 6 strongest devices. Its ON and OFF buttons act at once, without asking,
@@ -698,7 +709,8 @@ because neither loses anything, and the page notes that scanning slows Wi-Fi.
 Restarting, powering off and forgetting the network each ask first, with the second button
 in a different place, so a double tap cannot confirm by accident.
 
-Screenshots from the phone, taken with `scripts/screenshot.ps1` on 2026-11-07. Network
+Screenshots from the phone, taken with `scripts/screenshot.ps1` on 2026-11-07, except
+Home, read from `/dev/fb0` over SSH on 2026-11-10. Network
 names and the last half of the sensor's address are covered.
 
 | Home | Wi-Fi | Bluetooth | Camera |

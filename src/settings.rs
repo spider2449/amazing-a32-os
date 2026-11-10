@@ -100,6 +100,11 @@ impl Settings {
         Duration::from_millis(HOLD_TIMES_MS[self.hold])
     }
 
+    /// Hours east of UTC, for the panel's own clock.
+    pub fn utc_offset_hours(&self) -> i8 {
+        self.time_zone
+    }
+
     /// The time zone as a POSIX `TZ` value, which needs no zone files. Its sign is
     /// the opposite of the usual one, and the name in `<>` is what `%Z` shows.
     pub fn tz(&self) -> String {
