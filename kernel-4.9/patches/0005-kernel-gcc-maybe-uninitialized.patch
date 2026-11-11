@@ -1,0 +1,22 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] kernel: keep GCC maybe-uninitialized diagnostics non-fatal
+
+GCC 11 reports additional maybe-uninitialized diagnostics through the old
+hardened-usercopy inlining paths. After fixing the first concrete stack buffer,
+the same compiler diagnostic appears for cpumask_var_t new_mask in
+kernel/sched/core.c even though the buffer is populated through copy_from_user.
+
+Keep the diagnostic visible, but do not let this newer warning class stop the
+vendor kernel/ build. Other warnings remain fatal.
+
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,6 +3,7 @@
+ #
+ 
+ subdir-ccflags-y += -Werror
+ subdir-ccflags-y += $(call cc-option,-Wno-error=stringop-truncation)
++subdir-ccflags-y += $(call cc-option,-Wno-error=maybe-uninitialized)
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/mtprof
