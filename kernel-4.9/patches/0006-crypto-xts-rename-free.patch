@@ -7,8 +7,7 @@ so rename it without changing behavior.
 
 --- a/crypto/xts.c
 +++ b/crypto/xts.c
-@@ -327,17 +327,17 @@ out_put_alg:
- 	crypto_mod_put(alg);
+@@ -329,15 +329,15 @@ out_put_alg:
  	return inst;
  }
  
