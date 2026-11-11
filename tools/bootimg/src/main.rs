@@ -17,7 +17,8 @@ const USAGE: &str = "usage:
   bootimg cpio-list ARCHIVE
   bootimg cpio-extract ARCHIVE DIR  extract regular files with safe names
   bootimg mkinitramfs INIT OUT      create a newc archive holding INIT as /init
-  bootimg repack TEMPLATE RAMDISK_GZ OUT";
+  bootimg repack TEMPLATE RAMDISK_GZ OUT
+  bootimg repack-kernel TEMPLATE KERNEL RAMDISK_GZ OUT";
 
 /// Size of the boot partition, from the stock OTA scatter (0x1d80000-0x2d80000).
 const BOOT_PARTITION_BYTES: usize = 16 * 1024 * 1024;
@@ -109,8 +110,7 @@ fn mkinitramfs(init: &str, out: &str) -> Result {
     write(out, &cpio::build(&entries))
 }
 
-fn repack(template: &str, ramdisk: &str, out: &str) -> Result {
-    let image = load(template)?.with_ramdisk(read(ramdisk)?).build();
+fn write_boot_image(out: &str, image: Vec<u8>) -> Result {
     if image.len() > BOOT_PARTITION_BYTES {
         return Err(format!(
             "image is {} bytes, boot partition holds {BOOT_PARTITION_BYTES}",
@@ -120,6 +120,18 @@ fn repack(template: &str, ramdisk: &str, out: &str) -> Result {
     write(out, &image)?;
     println!("wrote {out}: {} bytes", image.len());
     Ok(())
+}
+
+fn repack(template: &str, ramdisk: &str, out: &str) -> Result {
+    let image = load(template)?.with_ramdisk(read(ramdisk)?).build();
+    write_boot_image(out, image)
+}
+
+fn repack_kernel(template: &str, kernel: &str, ramdisk: &str, out: &str) -> Result {
+    let image = load(template)?
+        .with_kernel_and_ramdisk(read(kernel)?, read(ramdisk)?)
+        .build();
+    write_boot_image(out, image)
 }
 
 fn run(args: &[String]) -> Result {
@@ -132,6 +144,9 @@ fn run(args: &[String]) -> Result {
         ["cpio-extract", archive, dir] => cpio_extract(archive, dir),
         ["mkinitramfs", init, out] => mkinitramfs(init, out),
         ["repack", template, ramdisk, out] => repack(template, ramdisk, out),
+        ["repack-kernel", template, kernel, ramdisk, out] => {
+            repack_kernel(template, kernel, ramdisk, out)
+        }
         _ => Err(USAGE.into()),
     }
 }
