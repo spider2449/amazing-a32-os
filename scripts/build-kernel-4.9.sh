@@ -9,7 +9,7 @@ cd "$ROOT"
 
 KERNEL_DIR="${A32_KERNEL49_DIR:-$ROOT/phone-tools/kernel-4.9}"
 OUT="${A32_KERNEL49_OUT:-$ROOT/target/kernel-4.9/build}"
-DEFCONFIG="${A32_KERNEL49_DEFCONFIG:-k37mv1_bsp_k49_defconfig}"
+CONFIG_FILE="${A32_KERNEL49_CONFIG:-$ROOT/kernel-4.9/configs/a32_bringup_defconfig}"
 CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
 JOBS="${A32_KERNEL49_JOBS:-}"
 PINNED="f42baea1a221dea8b56c44d24d931a537a8aea85"
@@ -63,16 +63,22 @@ MAKE_ARGS=(
 
 echo "kernel:       $KERNEL_DIR" | tee -a "$LOG"
 echo "commit:       $head" | tee -a "$LOG"
-echo "defconfig:    $DEFCONFIG" | tee -a "$LOG"
+echo "config:       $CONFIG_FILE" | tee -a "$LOG"
 echo "cross gcc:    $(command -v "${CROSS}gcc")" | tee -a "$LOG"
 "${CROSS}gcc" --version | head -n 1 | tee -a "$LOG"
 if command -v file >/dev/null 2>&1; then
   file "$KERNEL_DIR/tools/dct/old_dct/DrvGen" | tee -a "$LOG"
 fi
 
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "kernel config not found: $CONFIG_FILE" >&2
+  exit 2
+fi
+
 echo | tee -a "$LOG"
-echo "== defconfig ==" | tee -a "$LOG"
-make "${MAKE_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee -a "$LOG"
+echo "== A32 bring-up config ==" | tee -a "$LOG"
+cp "$CONFIG_FILE" "$OUT/.config"
+make "${MAKE_ARGS[@]}" olddefconfig 2>&1 | tee -a "$LOG"
 
 echo | tee -a "$LOG"
 echo "== selected MediaTek DT settings ==" | tee -a "$LOG"
