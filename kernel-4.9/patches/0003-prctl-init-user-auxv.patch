@@ -1,0 +1,21 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] prctl: initialize PR_SET_MM_AUXV stack buffer
+
+GCC 11 can see the partially populated user_auxv array through the hardened
+usercopy checks and reports a maybe-uninitialized warning. The MediaTek tree
+builds kernel/ with -Werror, so that warning stops the build.
+
+Initialize the array to zero. Newer upstream kernels use the same initialized
+form, and this preserves the existing PR_SET_MM_AUXV copy length semantics.
+
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1915,7 +1915,7 @@ static int prctl_set_auxv(struct mm_struct *mm, unsigned long addr,
+ 	 * up to the caller to provide sane values here, otherwise userspace
+ 	 * tools which use this vector might be unhappy.
+ 	 */
+-	unsigned long user_auxv[AT_VECTOR_SIZE];
++	unsigned long user_auxv[AT_VECTOR_SIZE] = {};
+ 
+ 	if (len > sizeof(user_auxv))
+ 		return -EINVAL;
