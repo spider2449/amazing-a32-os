@@ -27,6 +27,7 @@ jobs:
     env:
       A32_CROSS_COMPILE: arm-linux-gnueabihf-
       A32_KERNEL49_JOBS: "2"
+      A32_KERNEL49_VERBOSE: "1"
 
     steps:
       - name: Checkout A32 OS
@@ -92,6 +93,7 @@ jobs:
         with:
           name: kernel-4.9-diagnostics
           if-no-files-found: ignore
+          include-hidden-files: true
           path: |
             target/kernel-4.9/build.log
             target/kernel-4.9/build.status
