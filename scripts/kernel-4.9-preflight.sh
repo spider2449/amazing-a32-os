@@ -10,7 +10,14 @@ cd "$ROOT"
 
 KERNEL_DIR="${A32_KERNEL49_DIR:-$ROOT/phone-tools/kernel-4.9}"
 CONFIG_FILE="${A32_KERNEL49_CONFIG:-$ROOT/kernel-4.9/configs/a32_bringup_defconfig}"
-CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
+DEFAULT_CROSS="$ROOT/toolchains/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
+if [[ -n "${A32_CROSS_COMPILE:-}" ]]; then
+  CROSS="$A32_CROSS_COMPILE"
+elif [[ -x "${DEFAULT_CROSS}gcc" ]]; then
+  CROSS="$DEFAULT_CROSS"
+else
+  CROSS="$DEFAULT_CROSS"
+fi
 PINNED="f42baea1a221dea8b56c44d24d931a537a8aea85"
 DRVGEN="$KERNEL_DIR/tools/dct/old_dct/DrvGen"
 
@@ -74,11 +81,12 @@ if command -v "$gcc" >/dev/null 2>&1; then
 
   major="$("$gcc" -dumpversion 2>/dev/null | cut -d. -f1 || true)"
   if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 10 )); then
-    warn "GCC $major is much newer than this vendor 4.9 tree; if C compilation fails, try an older ARM GCC (4.9-8.x)"
+    warn "GCC $major is much newer than this vendor 4.9 tree; the CI-proven compiler is Android GCC 4.9 from scripts/prepare-kernel-4.9-toolchain.sh"
   fi
 else
   fail "cross compiler not found: $gcc"
-  printf '         set A32_CROSS_COMPILE to the compiler prefix, e.g. arm-linux-gnueabi-\n'
+  printf '         run scripts/prepare-kernel-4.9-toolchain.sh\n'
+  printf '         or set A32_CROSS_COMPILE to another tested compiler prefix\n'
 fi
 
 echo

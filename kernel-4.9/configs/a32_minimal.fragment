@@ -13,6 +13,12 @@
 # CONFIG_MTK_VIDEOX is not set
 # CONFIG_MTK_GPU_SUPPORT is not set
 
+# SMI/MMDVFS is a multimedia bandwidth stack. On MT6735M this vendor tree
+# links mmdvfs_mgr unconditionally when MTK_SMI_EXT=y, and that code calls the
+# framebuffer-only DISP_GetScreenWidth/Height symbols. It is not needed for
+# the serial/eMMC/initramfs first-boot milestone.
+# CONFIG_MTK_SMI_EXT is not set
+
 # k37 touch: Amazing A32 controller model is not yet identified.
 # CONFIG_TOUCHSCREEN_MTK is not set
 # CONFIG_TOUCHSCREEN_MTK_GT1151 is not set

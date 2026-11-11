@@ -11,7 +11,17 @@ KERNEL_DIR="${A32_KERNEL49_DIR:-$ROOT/phone-tools/kernel-4.9}"
 OUT="${A32_KERNEL49_OUT:-$ROOT/target/kernel-4.9/build}"
 CONFIG_FILE="${A32_KERNEL49_CONFIG:-$ROOT/kernel-4.9/configs/a32_bringup_defconfig}"
 CONFIG_FRAGMENT="${A32_KERNEL49_FRAGMENT:-}"
-CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
+DEFAULT_CROSS="$ROOT/toolchains/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
+if [[ -n "${A32_CROSS_COMPILE:-}" ]]; then
+  CROSS="$A32_CROSS_COMPILE"
+elif [[ -x "${DEFAULT_CROSS}gcc" ]]; then
+  CROSS="$DEFAULT_CROSS"
+else
+  echo "Android GCC 4.9 toolchain is not prepared." >&2
+  echo "run: scripts/prepare-kernel-4.9-toolchain.sh" >&2
+  echo "or set A32_CROSS_COMPILE explicitly." >&2
+  exit 2
+fi
 JOBS="${A32_KERNEL49_JOBS:-}"
 VERBOSE="${A32_KERNEL49_VERBOSE:-0}"
 PINNED="f42baea1a221dea8b56c44d24d931a537a8aea85"

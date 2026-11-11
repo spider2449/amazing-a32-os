@@ -52,3 +52,9 @@ echo "kernel source: $DEST"
 echo "source repo:   $REPO"
 echo "source ref:    $REF"
 echo "commit:        $actual"
+
+if [[ "${A32_SKIP_KERNEL49_TOOLCHAIN:-0}" != "1" ]]; then
+  echo
+  echo "== Android GCC 4.9 toolchain =="
+  bash "$ROOT/scripts/prepare-kernel-4.9-toolchain.sh"
+fi
