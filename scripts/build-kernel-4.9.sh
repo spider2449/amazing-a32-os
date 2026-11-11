@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the pinned MT6737-family Linux 4.9 candidate far enough to produce
 # arch/arm/boot/zImage-dtb. It never creates a boot image and never talks to
-# the phone; use build-kernel-4.9-image.sh for the next step.
+# the phone; see docs/kernel-4.9-boot-test.md for packaging prerequisites.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -168,4 +168,5 @@ fi
 cp "$IMAGE" "$ROOT/target/kernel-4.9/zImage-dtb"
 echo
 echo "built: target/kernel-4.9/zImage-dtb"
-echo "next:  scripts/build-kernel-4.9-image.sh target/kernel-4.9/zImage-dtb"
+echo "next:  bash scripts/verify-kernel-artifacts.sh"
+echo "boot packaging prerequisites: docs/kernel-4.9-boot-test.md"

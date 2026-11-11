@@ -54,36 +54,16 @@ compatibility patches. The compressed `zImage` does not expose its banner to
 plain `strings`; the recorder reads the decompressed payload instead.
 This establishes a build baseline; device boot has not been validated.
 
-The stock boot header remains the template because the working phone has already
-proved its load addresses, page size and command line. The host boot-image tool
-now has a separate command that replaces both the kernel and the ramdisk while
-preserving those header fields:
+The current offline workflow preserves the stock ramdisk and replaces only the
+kernel. It does not build Rust userspace. See [boot artifact and image validation](kernel-4.9-boot-test.md)
+for verified artifacts, stock header details, signing blockers and future RAM-boot
+commands. The old image script now delegates to this strict workflow and requires
+`STOCK_BOOT.img KERNEL_IMAGE [OUTPUT.img]`.
 
-```text
-cargo bootimg repack-kernel TEMPLATE KERNEL RAMDISK_GZ OUT
-```
-
-Build a test image after a 4.9 `zImage-dtb` (or equivalent single kernel blob)
-exists:
-
-```sh
-scripts/build-kernel-4.9-image.sh PATH/TO/zImage-dtb
-```
-
-The output is:
-
-```text
-target/a32-kernel-4.9-boot.img
-```
-
-For bring-up, use RAM boot only:
-
-```sh
-fastboot boot target/a32-kernel-4.9-boot.img
-```
-
-Do not flash the 4.9 image until RAM boot is repeatable and the recovery path is
-confirmed.
+The existing k37 reference DT/config is not ready for A32 hardware. Current stock
+boot images also have signing/vendor trailers, which the repacker refuses to
+silently discard or retain after changing the kernel. No test boot image has
+been produced from those signed inputs.
 
 ## Bring-up order
 
