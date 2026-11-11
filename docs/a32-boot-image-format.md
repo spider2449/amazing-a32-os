@@ -88,7 +88,7 @@ Boot/recovery carry Linux 3.18.35+ dated 2018-09-13; OTA carries 3.18.35+ dated
 |---|---|---|
 | Header and section boundaries | CONFIRMED | Header sizes, ARM zImage magic/start/end, page-aligned section layout and zero padding validated independently |
 | DER sequence and embedded X.509 certificate | CONFIRMED | openssl asn1parse succeeds; first integer 1, embedded certificate, SHA256/RSA algorithm, attributes sequence and 256-byte signature |
-| Android BootSignature v1 naming | LIKELY | Narrow schema matches version/certificate/algorithm/target-length attributes/signature pattern; no format name inferred merely from a magic hit |
+| Android BootSignature v1 naming | BootSignature-v1-like | Narrow schema matches version/certificate/algorithm/target-length attributes/signature pattern; no local standard implementation proves exact vendor equivalence; see [follow-up analysis](a32-final-trailer-analysis.md) |
 | First-layer cryptographic consistency | CONFIRMED | All three verify with openssl dgst -sha256 using embedded certificate key over bytes [0, logical_end) followed by original DER attributes |
 | Embedded key trusted by device | UNKNOWN | Embedded self-description is not a bootloader trust anchor or authorization |
 | Final 256 bytes | UNKNOWN | No known magic, opaque content, different for all three; signature-sized is not proof of RSA or of what it covers |

@@ -218,7 +218,7 @@ def tail_evidence(tail):
 
 def der_item(data, offset, limit):
     """Bounded single-byte-tag DER TLV; reject indefinite/nonminimal lengths."""
-    if offset + 2 > limit or limit > len(data):
+    if offset < 0 or limit < 0 or offset + 2 > limit or limit > len(data):
         raise ValueError('truncated DER tag/length')
     tag, first = data[offset:offset + 2]
     if tag & 31 == 31:
@@ -271,7 +271,7 @@ def boot_signature(tail):
         raise ValueError('noncanonical/negative signed length')
     if parts[4][3] - parts[4][2] != 256:
         raise ValueError('unexpected RSA signature size')
-    return {'classification': 'LIKELY Android BootSignature v1 (schema; trust unproven)',
+    return {'classification': 'BootSignature-v1-like (schema; trust unproven)',
             'der_size': end, 'target': target, 'signed_length': int.from_bytes(integer, 'big'),
             'algorithm': 'sha256WithRSAEncryption', 'signature_bytes': 256,
             'certificate_range': [parts[1][1], parts[1][3]],

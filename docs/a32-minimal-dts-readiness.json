@@ -1,0 +1,24 @@
+{
+  "baseline": "6f838bf48371057ffeb942ebf18f14f315356d19",
+  "components": [
+    {"component": "CPU", "ready": "PARTIAL", "evidence": "docs/a32-cpu-handoff.md"},
+    {"component": "memory", "ready": "PARTIAL", "evidence": "docs/a32-memory-map.md; LK final RAM fixup unknown"},
+    {"component": "GIC", "ready": "YES", "evidence": "stock interrupt-controller@10220000 and 4.9 drivers/misc/mediatek/irq/mt6735/irq.c matching binding"},
+    {"component": "timer", "ready": "PARTIAL", "evidence": "docs/a32-clock-migration.md; declared 13 MHz, handoff unknown"},
+    {"component": "minimum clocks", "ready": "PARTIAL", "evidence": "docs/a32-clock-migration.md"},
+    {"component": "UART0", "ready": "PARTIAL", "evidence": "docs/a32-uart0-migration.md"},
+    {"component": "pinctrl", "ready": "PARTIAL", "evidence": "docs/a32-emmc-migration.md; UART mapping unknown"},
+    {"component": "PWRAP", "ready": "PARTIAL", "evidence": "docs/a32-pmic-identification.md; transport initialization not proven"},
+    {"component": "PMIC", "ready": "PARTIAL", "evidence": "docs/a32-pmic-identification.md; HIGH candidate, not proven generic-compatible hardware path"},
+    {"component": "regulators", "ready": "PARTIAL", "evidence": "docs/a32-emmc-migration.md"},
+    {"component": "eMMC power path", "ready": "NO", "evidence": "docs/a32-emmc-migration.md; missing stock consumer edges"},
+    {"component": "watchdog handoff", "ready": "NO", "evidence": "docs/a32-watchdog-handoff.md"},
+    {"component": "chosen", "ready": "PARTIAL", "evidence": "docs/a32-lk-dt-fixups.md"},
+    {"component": "reserved-memory", "ready": "PARTIAL", "evidence": "docs/a32-memory-map.md; dynamic/LK final allocation unknown"}
+  ],
+  "eMMC timing": {
+    "ready": "NO",
+    "stock_conservative_proven": false,
+    "evidence": "docs/a32-emmc-migration.md; 3.18 edge parser unavailable"
+  }
+}
