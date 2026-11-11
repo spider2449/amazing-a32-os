@@ -1,0 +1,26 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] ARM: avoid cc-option armv7 fallback with armhf GCC 11
+
+The old ARM Kbuild probes -march=armv7-a before -msoft-float has been added
+to KBUILD_CFLAGS. With an arm-linux-gnueabihf GCC 11 toolchain, the compiler
+rejects that probe because the hard-float default requires an FPU selection.
+The cc-option expression then silently falls back to armv5t.
+
+That fallback later makes the assembler reject ARMv7 instructions used by the
+kernel, including cpsid/cpsie and isb.
+
+For this MT6737M bring-up, CONFIG_CPU_32v7 is the selected architecture.
+Use the actual ARMv7 architecture flag directly instead of the obsolete
+fallback. This matches the direction taken by newer upstream ARM Kbuild.
+
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -65,7 +65,7 @@
+ # macro, but instead defines a whole series of macros which makes
+ # testing for a specific architecture or later rather impossible.
+ arch-$(CONFIG_CPU_32v7M)	=-D__LINUX_ARM_ARCH__=7 -march=armv7-m -Wa,-march=armv7-m
+-arch-$(CONFIG_CPU_32v7)		=-D__LINUX_ARM_ARCH__=7 $(call cc-option,-march=armv7-a,-march=armv5t -Wa$(comma)-march=armv7-a)
++arch-$(CONFIG_CPU_32v7)		=-D__LINUX_ARM_ARCH__=7 -march=armv7-a
+ arch-$(CONFIG_CPU_32v6)		=-D__LINUX_ARM_ARCH__=6 $(call cc-option,-march=armv6,-march=armv5t -Wa$(comma)-march=armv6)
+ # Only override the compiler option if ARMv6. The ARMv6K extensions are
+ # always available in ARMv7
