@@ -1,0 +1,20 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] regmap: remove packed attribute from rbtree cache node
+
+Modern GCC diagnoses the packed regcache_rbtree_node because it contains
+naturally aligned pointers and struct rb_node members whose addresses are used
+directly. The packing is unnecessary here and was removed from upstream Linux.
+
+Restore natural alignment rather than suppressing the alignment diagnostics.
+
+--- a/drivers/base/regmap/regcache-rbtree.c
++++ b/drivers/base/regmap/regcache-rbtree.c
+@@ -33,7 +33,7 @@ struct regcache_rbtree_node {
+ 	unsigned int blklen;
+ 	/* the actual rbtree node holding this block */
+ 	struct rb_node node;
+-} __attribute__ ((packed));
++};
+ 
+ struct regcache_rbtree_ctx {
+ 	struct rb_root root;
