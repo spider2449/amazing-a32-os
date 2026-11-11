@@ -12,6 +12,7 @@ OUT="${A32_KERNEL49_OUT:-$ROOT/target/kernel-4.9/build}"
 CONFIG_FILE="${A32_KERNEL49_CONFIG:-$ROOT/kernel-4.9/configs/a32_bringup_defconfig}"
 CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
 JOBS="${A32_KERNEL49_JOBS:-}"
+VERBOSE="${A32_KERNEL49_VERBOSE:-0}"
 PINNED="f42baea1a221dea8b56c44d24d931a537a8aea85"
 DRVGEN_WRAPPER="$ROOT/scripts/mtk-drvgen-wrapper.sh"
 PREFLIGHT="$ROOT/scripts/kernel-4.9-preflight.sh"
@@ -67,6 +68,9 @@ MAKE_ARGS=(
   CROSS_COMPILE="$CROSS"
   python="$DRVGEN_WRAPPER"
 )
+if [[ "$VERBOSE" == "1" ]]; then
+  MAKE_ARGS+=(V=1)
+fi
 
 echo "kernel:       $KERNEL_DIR" | tee -a "$LOG"
 echo "commit:       $head" | tee -a "$LOG"
@@ -88,8 +92,16 @@ cp "$CONFIG_FILE" "$OUT/.config"
 make "${MAKE_ARGS[@]}" olddefconfig 2>&1 | tee -a "$LOG"
 
 echo | tee -a "$LOG"
-echo "== selected MediaTek DT settings ==" | tee -a "$LOG"
-grep -E 'CONFIG_(MACH_MT6735M|MTK_DTBO_FEATURE|BUILD_ARM_APPENDED_DTB_IMAGE|BUILD_ARM_APPENDED_DTB_IMAGE_NAMES|BUILD_ARM_DTB_OVERLAY_IMAGE|BUILD_ARM_DTB_OVERLAY_IMAGE_NAMES|ARCH_MTK_PROJECT)='   "$OUT/.config" | tee -a "$LOG" || true
+echo "== selected ARM / MediaTek settings ==" | tee -a "$LOG"
+grep -E 'CONFIG_(CPU_V7|CPU_32v7|ARCH_MEDIATEK|MACH_MT6735M|MTK_DTBO_FEATURE|BUILD_ARM_APPENDED_DTB_IMAGE|BUILD_ARM_APPENDED_DTB_IMAGE_NAMES|BUILD_ARM_DTB_OVERLAY_IMAGE|BUILD_ARM_DTB_OVERLAY_IMAGE_NAMES|ARCH_MTK_PROJECT)=' "$OUT/.config" | tee -a "$LOG" || true
+
+echo | tee -a "$LOG"
+echo "== compiler ARMv7 probe ==" | tee -a "$LOG"
+if printf 'int x;\n' | "${CROSS}gcc" -march=armv7-a -x c -c -o /dev/null - 2>>"$LOG"; then
+  echo "armv7-a accepted by ${CROSS}gcc" | tee -a "$LOG"
+else
+  echo "armv7-a rejected by ${CROSS}gcc" | tee -a "$LOG"
+fi
 
 echo | tee -a "$LOG"
 echo "== zImage-dtb ==" | tee -a "$LOG"
