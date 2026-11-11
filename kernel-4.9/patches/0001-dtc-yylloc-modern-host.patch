@@ -1,0 +1,33 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] scripts/dtc: avoid duplicate yylloc definition on modern hosts
+
+GCC 10 changed the default from -fcommon to -fno-common.  This old DTC lexer
+defines yylloc even though the parser also provides the definition, so linking
+the host dtc fails with a multiple-definition error.  Keep only the parser
+definition and declare it extern in the lexer.
+
+Patch both the flex source and the shipped generated lexer because this vendor
+tree builds the shipped file directly.
+
+--- a/scripts/dtc/dtc-lexer.l
++++ b/scripts/dtc/dtc-lexer.l
+@@ -34,7 +34,7 @@
+ #include "srcpos.h"
+ #include "dtc-parser.tab.h"
+ 
+-YYLTYPE yylloc;
++extern YYLTYPE yylloc;
+ extern bool treesource_error;
+ 
+ /* CAUTION: this will stop working if we ever use yyless() or yyunput() */
+--- a/scripts/dtc/dtc-lexer.lex.c_shipped
++++ b/scripts/dtc/dtc-lexer.lex.c_shipped
+@@ -637,7 +637,7 @@
+ #include "srcpos.h"
+ #include "dtc-parser.tab.h"
+ 
+-YYLTYPE yylloc;
++extern YYLTYPE yylloc;
+ extern bool treesource_error;
+ 
+ /* CAUTION: this will stop working if we ever use yyless() or yyunput() */
