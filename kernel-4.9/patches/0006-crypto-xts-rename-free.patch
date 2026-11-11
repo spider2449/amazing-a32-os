@@ -7,7 +7,8 @@ so rename it without changing behavior.
 
 --- a/crypto/xts.c
 +++ b/crypto/xts.c
-@@ -329,7 +329,7 @@ out_put_alg:
+@@ -327,17 +327,17 @@ out_put_alg:
+ 	crypto_mod_put(alg);
  	return inst;
  }
  
@@ -16,7 +17,8 @@ so rename it without changing behavior.
  {
  	crypto_drop_spawn(crypto_instance_ctx(inst));
  	kfree(inst);
-@@ -338,7 +338,7 @@ static void free(struct crypto_instance *inst)
+ }
+ 
  static struct crypto_template crypto_tmpl = {
  	.name = "xts",
  	.alloc = alloc,
