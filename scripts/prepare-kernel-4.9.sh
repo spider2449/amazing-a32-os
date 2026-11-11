@@ -18,6 +18,10 @@ if [[ -e "$DEST" && ! -d "$DEST/.git" ]]; then
   exit 2
 fi
 
+# Linux has tracked filenames that differ only by case (e.g. xt_HL.c and
+# xt_hl.c). Refuse an unsafe checkout before Git silently overwrites one.
+bash "$ROOT/scripts/kernel-4.9-check-filesystem.sh" "$DEST"
+
 if [[ ! -d "$DEST/.git" ]]; then
   mkdir -p "$(dirname "$DEST")"
   git init "$DEST"
@@ -36,7 +40,9 @@ fi
 if compgen -G "$PATCH_DIR/*.patch" >/dev/null; then
   echo "applying A32 host/build compatibility patches:"
   for patch in "$PATCH_DIR"/*.patch; do
-    if git -C "$DEST" apply --reverse --check "$patch" >/dev/null 2>&1; then
+    # Later patches can change adjacent context (0005 follows 0004).
+    # For detection only, allow reduced context while matching the actual edit.
+    if git -C "$DEST" apply --reverse --check -C0 "$patch" >/dev/null 2>&1; then
       echo "  already applied: $(basename "$patch")"
     elif git -C "$DEST" apply --check "$patch" >/dev/null 2>&1; then
       git -C "$DEST" apply "$patch"

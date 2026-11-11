@@ -29,6 +29,9 @@ DRVGEN_WRAPPER="$ROOT/scripts/mtk-drvgen-wrapper.sh"
 PREFLIGHT="$ROOT/scripts/kernel-4.9-preflight.sh"
 LOG="$ROOT/target/kernel-4.9/build.log"
 
+bash "$ROOT/scripts/kernel-4.9-check-filesystem.sh" "$KERNEL_DIR"
+bash "$ROOT/scripts/kernel-4.9-check-filesystem.sh" "$OUT"
+
 if [[ -f "$PREFLIGHT" ]]; then
   echo "== host preflight =="
   bash "$PREFLIGHT"

@@ -1,0 +1,76 @@
+{
+  "kernelversion": "4.9.117",
+  "linux_banner": "Linux version 4.9.117-a32-k49+ (morefunfun@r5) (gcc version 4.9.x 20150123 (prerelease) (GCC) ) #1 SMP PREEMPT Wed Nov 11 21:31:02 CST 2026",
+  "source_commit": "f42baea1a221dea8b56c44d24d931a537a8aea85",
+  "source_diff_sha256": "e0cb142953821ffed8228ce45ff55b3ed441d10d8182a92628288475b7c16379",
+  "config": {
+    "bytes": 115762,
+    "sha256": "3962ad7e641f9b884c8bf5a2640dac7f77ed6285bd7928f3ec8408c145820bd2"
+  },
+  "bringup_defconfig": {
+    "bytes": 9399,
+    "sha256": "d93620c9c73a21bbcb05eea7d4644a1effb8ad3488b16562bddb69df7fa2932d"
+  },
+  "patches": {
+    "0001-dtc-yylloc-modern-host.patch": {
+      "bytes": 1099,
+      "sha256": "f04492c0bedb25e50a8fbdb508b5a22056bff0f061f8541990a741025e1b4289"
+    },
+    "0002-armv7-gcc11-cc-option.patch": {
+      "bytes": 1428,
+      "sha256": "1efbebc72a76a83412685616ed36f54eb5d51ae518e61f8a8dc5b73b198c1ecc"
+    },
+    "0003-prctl-init-user-auxv.patch": {
+      "bytes": 868,
+      "sha256": "c37ff8a4f780cfc6635f944fe5d45c1272693b0283d3045d74f9a8d2c4c14a0e"
+    },
+    "0004-kernel-gcc-stringop-truncation.patch": {
+      "bytes": 933,
+      "sha256": "8b855f9a0b7bd55e13c42943e128f9d85d938c1dd8f74002892a9f57e14d1dd5"
+    },
+    "0005-kernel-gcc-maybe-uninitialized.patch": {
+      "bytes": 976,
+      "sha256": "50ab76468470244e625f7e7582472d708d728550ac7e04315414a705db68b2fd"
+    },
+    "0006-crypto-xts-rename-free.patch": {
+      "bytes": 702,
+      "sha256": "1d675f1b86217e32164ce03dc0c60e66e3f6446c5c81fa3961270da86def464a"
+    },
+    "0007-regmap-remove-packed-rbtree-node.patch": {
+      "bytes": 737,
+      "sha256": "61faaa7dcfa440ca7c0637b7f5d28d7e2155ea5f16637d27df8606fa9a5fc8e0"
+    },
+    "0008-sound-gcc-maybe-uninitialized.patch": {
+      "bytes": 730,
+      "sha256": "4b2a4de76b3ff842725afddcc36ebe91ead47ff3a72d0d4f4ad835f849396da6"
+    }
+  },
+  "artifacts": {
+    "arch/arm/boot/Image": {
+      "bytes": 17633280,
+      "sha256": "1854a8887b4d0fb2bec087e9fe92ff46239d34d838a349d90f3a2236d6c5cf52"
+    },
+    "arch/arm/boot/zImage": {
+      "bytes": 6978536,
+      "sha256": "4247b4a054dc36f84bfbe783142479f17861909558109bb312dbe9abea8dc54e"
+    },
+    "arch/arm/boot/zImage-dtb": {
+      "bytes": 7025796,
+      "sha256": "903407f54fac63359a73dc20df082e10d44bd0176e7bcb2dd0e72ceaa2a069fc"
+    },
+    "arch/arm/boot/dts/k37mv1_bsp_k49.dtb": {
+      "bytes": 36356,
+      "sha256": "d8ee9405350958187f38a7b630168272f62fb3a1a53cf18f9616a50d4775fbf1"
+    },
+    "arch/arm/boot/dts/mt6735m.dtb": {
+      "bytes": 47260,
+      "sha256": "162c70791c87a7bd96dc1d2980f7747b80cd2e43d93f328981d332cdffd96ef1"
+    }
+  },
+  "verified": [
+    "zImage decompresses to Image",
+    "zImage-dtb equals zImage + mt6735m.dtb",
+    "exported zImage-dtb matches build output"
+  ],
+  "validation_scope": "Build and artifact verification only; no device boot or flash performed."
+}

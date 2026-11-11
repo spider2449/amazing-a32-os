@@ -23,7 +23,36 @@ Fetch the pinned tree into the ignored `phone-tools` directory:
 scripts/prepare-kernel-4.9.sh
 ```
 
+The kernel source must be on a case-sensitive filesystem: the vendor tree
+contains both `net/netfilter/xt_HL.c` and `net/netfilter/xt_hl.c`, plus other
+case-only filename pairs. Preparation checks this before checkout.
+On WSL, use a source directory under `/home`, then link the default path to it:
+
+```sh
+bash scripts/prepare-kernel-4.9.sh "$HOME/a32-kernel-4.9"
+ln -s "$HOME/a32-kernel-4.9" phone-tools/kernel-4.9
+```
+
+If the default source directory already exists on a Windows drive, preserve it
+under a different name before creating the link. A fresh checkout restores both
+members of each filename pair; copying the damaged working tree does not.
+The build output must also be case-sensitive. On WSL, set
+`A32_KERNEL49_OUT="$HOME/a32-kernel-4.9-build"` when building, or symlink
+`target/kernel-4.9/build` to a directory under `/home`. The build script checks
+both directories before compiling.
+
 ## Boot-image path
+
+The successful full-build baseline is tagged `kernel-4.9-build-success`.
+Its artifact sizes, SHA-256 hashes, actual config hash, pinned source commit,
+patch hashes and Linux banner are saved in `kernel-4.9-build-success.json`.
+Run `python3 scripts/record-kernel-4.9-build.py` in WSL after subsequent builds
+to write `target/kernel-4.9/build-manifest.json`. The recorder checks the gzip
+payload against `Image`, the appended DTB, and the exported kernel copy.
+The baseline release is `4.9.117-a32-k49+`; the suffix includes the local
+compatibility patches. The compressed `zImage` does not expose its banner to
+plain `strings`; the recorder reads the decompressed payload instead.
+This establishes a build baseline; device boot has not been validated.
 
 The stock boot header remains the template because the working phone has already
 proved its load addresses, page size and command line. The host boot-image tool
