@@ -95,7 +95,7 @@ else
   fi
 
   if command -v readelf >/dev/null 2>&1; then
-    interp="$(readelf -l "$DRVGEN" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p' | head -n 1)"
+    interp="$(readelf -l "$DRVGEN" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p' | head -n 1 || true)"
     if [[ -n "$interp" ]]; then
       if [[ -e "$interp" ]]; then
         ok "DrvGen ELF interpreter exists: $interp"
