@@ -14,7 +14,14 @@ CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
 JOBS="${A32_KERNEL49_JOBS:-}"
 PINNED="f42baea1a221dea8b56c44d24d931a537a8aea85"
 DRVGEN_WRAPPER="$ROOT/scripts/mtk-drvgen-wrapper.sh"
+PREFLIGHT="$ROOT/scripts/kernel-4.9-preflight.sh"
 LOG="$ROOT/target/kernel-4.9/build.log"
+
+if [[ -f "$PREFLIGHT" ]]; then
+  echo "== host preflight =="
+  bash "$PREFLIGHT"
+  echo
+fi
 
 if [[ ! -d "$KERNEL_DIR/.git" ]]; then
   echo "kernel source is missing: $KERNEL_DIR" >&2
