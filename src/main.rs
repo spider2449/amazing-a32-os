@@ -17,6 +17,8 @@ mod bluetooth;
 mod identify;
 #[cfg(any(target_os = "linux", test))]
 mod charging;
+#[cfg(any(target_os = "linux", test))]
+mod compat;
 mod probe;
 #[cfg(any(target_os = "linux", test))]
 mod photo;
