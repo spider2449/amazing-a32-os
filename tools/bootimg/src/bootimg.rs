@@ -106,6 +106,18 @@ impl BootImage {
         }
     }
 
+    /// Swaps both the kernel and ramdisk and drops the trailer, whose signature
+    /// would no longer match the new contents. Header addresses and command line
+    /// remain those of the template image.
+    pub fn with_kernel_and_ramdisk(&self, kernel: Vec<u8>, ramdisk: Vec<u8>) -> Self {
+        Self {
+            kernel,
+            ramdisk,
+            trailer: Vec::new(),
+            ..self.clone()
+        }
+    }
+
     /// Serializes the image with refreshed section sizes and ID.
     pub fn build(&self) -> Vec<u8> {
         let page = self.page_size();
@@ -162,6 +174,25 @@ mod tests {
         assert_eq!(parsed.ramdisk, vec![3; 5000]);
         assert!(parsed.trailer.is_empty());
         assert_eq!(parsed.kernel, original.kernel);
+    }
+
+    #[test]
+    fn replacing_kernel_and_ramdisk_updates_id_and_keeps_header_fields() {
+        let original = BootImage::parse(&sample().build()).unwrap();
+        let parsed = BootImage::parse(
+            &original
+                .with_kernel_and_ramdisk(vec![4; 4097], vec![5; 257])
+                .build(),
+        )
+        .unwrap();
+        assert!(parsed.id_matches());
+        assert_eq!(parsed.kernel, vec![4; 4097]);
+        assert_eq!(parsed.ramdisk, vec![5; 257]);
+        assert!(parsed.trailer.is_empty());
+        assert_eq!(parsed.page_size(), original.page_size());
+        assert_eq!(parsed.text(64, 512), original.text(64, 512));
+        assert_eq!(parsed.field(12), original.field(12));
+        assert_eq!(parsed.field(20), original.field(20));
     }
 
     #[test]
