@@ -1,0 +1,68 @@
+===== Amazing A32 compatibility audit =====
+
+--- kernel ---
+Linux a32 3.18.35+ #1 SMP PREEMPT Thu Nov 5 14:48:06 CST 2020 armv7l Linux
+Linux version 3.18.35+ (zhangsu@zhangsuk) (gcc version 4.8 (GCC) ) #1 SMP PREEMPT Thu Nov 5 14:48:06 CST 2020
+
+--- Alpine / apk ---
+Alpine: 3.24.4
+apk-tools 3.0.9-r0, compiled for armv7.
+apk arch: armv7
+
+--- repositories ---
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community
+
+--- namespaces ---
+yes mnt
+no  user
+no  pid
+no  net
+
+--- cgroups ---
+#subsys_name	hierarchy	num_cgroups	enabled
+cpu	0	1	1
+cpuacct	0	1	1
+freezer	0	1	1
+debug	0	1	1
+
+--- filesystems ---
+nodev	sysfs
+nodev	rootfs
+nodev	ramfs
+nodev	bdev
+nodev	proc
+nodev	cgroup
+nodev	tmpfs
+nodev	debugfs
+nodev	sockfs
+nodev	pipefs
+nodev	configfs
+nodev	devpts
+	ext3
+	ext2
+	ext4
+	vfat
+	msdos
+	iso9660
+	fuseblk
+nodev	fuse
+nodev	fusectl
+nodev	pstore
+nodev	selinuxfs
+nodev	mtd_inodefs
+nodev	functionfs
+
+--- registered misc devices ---
+yes tun
+yes loop-control
+
+--- runtime tracing ---
+strace: not installed
+Install it with: apk add strace
+
+Interpretation:
+  no exact package / no armv7 candidate -> repository or architecture problem
+  relocation / interpreter failure       -> userspace ABI problem
+  ENOSYS                                  -> missing syscall; fallback or newer kernel
+  EPERM/EOPNOTSUPP + namespace/cgroup     -> missing/restricted kernel feature

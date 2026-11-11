@@ -1,0 +1,23 @@
+### compat
+unknown command or arguments, try: help
+### wifi
+startup: ready
+bssid=c4:e5:32:8d:b5:83
+freq=2437
+ssid=CHT Wi-Fi Home-MXH
+id=0
+mode=station
+pairwise_cipher=CCMP
+group_cipher=CCMP
+key_mgmt=WPA2-PSK
+wpa_state=COMPLETED
+ip_address=192.168.1.106
+address=00:08:22:61:75:be
+uuid=b0a91fb4-3c2d-5756-aa17-4304a86aee11
+### alpine uname -a; cat /etc/alpine-release; apk --version; apk --print-arch; cat /etc/apk/repositories
+Linux a32 3.18.35+ #1 SMP PREEMPT Thu Nov 5 14:48:06 CST 2020 armv7l Linux
+3.24.4
+apk-tools 3.0.9-r0, compiled for armv7.
+armv7
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community

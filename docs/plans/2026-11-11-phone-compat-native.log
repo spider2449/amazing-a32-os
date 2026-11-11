@@ -1,0 +1,39 @@
+### compat
+A32 kernel compatibility
+
+kernel:
+  release              3.18.35+
+
+namespaces:
+  mount                yes
+  user                 no
+  pid                  no
+  network              no
+
+cgroups:
+  cpu                  yes
+  cpuacct              yes
+  freezer              yes
+  memory               no
+  pids                 no
+
+filesystems:
+  ext4                 yes
+  fuse                 yes
+  overlay              no
+  squashfs             no
+  f2fs                 no
+
+registered devices:
+  tun                  yes
+  loop-control         yes
+
+modern syscalls:
+  getrandom            yes
+  memfd_create         yes
+  copy_file_range      no (ENOSYS)
+  statx                no (ENOSYS)
+  io_uring_setup       no (ENOSYS)
+  pidfd_open           no (ENOSYS)
+  clone3               no (ENOSYS)
+  openat2              no (ENOSYS)
