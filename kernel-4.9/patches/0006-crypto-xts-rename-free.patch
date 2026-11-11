@@ -1,0 +1,26 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] crypto: xts: rename local free helper
+
+Modern GCC treats a function named free with a non-libc prototype as a
+builtin-declaration mismatch. The XTS template helper is private to this file,
+so rename it without changing behavior.
+
+--- a/crypto/xts.c
++++ b/crypto/xts.c
+@@ -329,7 +329,7 @@ out_put_alg:
+ 	return inst;
+ }
+ 
+-static void free(struct crypto_instance *inst)
++static void free_instance(struct crypto_instance *inst)
+ {
+ 	crypto_drop_spawn(crypto_instance_ctx(inst));
+ 	kfree(inst);
+@@ -338,7 +338,7 @@ static void free(struct crypto_instance *inst)
+ static struct crypto_template crypto_tmpl = {
+ 	.name = "xts",
+ 	.alloc = alloc,
+-	.free = free,
++	.free = free_instance,
+ 	.module = THIS_MODULE,
+ };
