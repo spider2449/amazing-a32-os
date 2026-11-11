@@ -1,0 +1,21 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] sound: keep GCC maybe-uninitialized diagnostics non-fatal
+
+The vendor sound tree is built with subdir -Werror. GCC 11 emits the same
+hardened-usercopy maybe-uninitialized diagnostic already seen in kernel/ when
+copy_from_user writes into stack buffers.
+
+Keep the warning visible while preventing this newer compiler diagnostic from
+stopping the legacy sound tree build. Other warnings remain fatal.
+
+--- a/sound/Makefile
++++ b/sound/Makefile
+@@ -2,6 +2,7 @@
+ # Makefile for the Linux sound card driver
+ #
+ 
+ subdir-ccflags-y += -Werror
++subdir-ccflags-y += $(call cc-option,-Wno-error=maybe-uninitialized)
+ 
+ obj-$(CONFIG_SOUND) += soundcore.o
+ obj-$(CONFIG_SOUND_PRIME) += oss/
