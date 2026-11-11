@@ -12,6 +12,7 @@ const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const HELP: &str = "commands:
   help                         show this text
   info                         show kernel, SoC and memory
+  compat                       show kernel features that limit new userspace
   ls PATH                      list a directory
   cat PATH                     print a file
   dmesg                        print the kernel log
@@ -110,6 +111,7 @@ fn execute(line: &str, out: &mut impl Write, platform: &impl Platform) -> io::Re
         [] => Ok(()),
         ["help"] => out.write_all(HELP.as_bytes()),
         ["info"] => out.write_all(crate::probe::report().as_bytes()),
+        ["compat"] => out.write_all(crate::compat::report().as_bytes()),
         ["ls", path] => list(path, out),
         ["cat", path] => fs::read(path).and_then(|data| out.write_all(&data)),
         ["dmesg"] => platform.kernel_log().and_then(|log| out.write_all(&log)),
@@ -342,6 +344,7 @@ mod tests {
         assert!(session("help\n").0.contains("reboot"));
         assert!(session("dmesg\n").0.contains("kernel line"));
         assert!(session("info\n").0.contains("a32-init"));
+        assert!(session("compat\n").0.contains("A32 kernel compatibility"));
     }
 
     #[test]
