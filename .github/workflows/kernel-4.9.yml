@@ -21,12 +21,22 @@ concurrency:
 
 jobs:
   build:
+    name: build (${{ matrix.profile }})
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: reference
+            fragment: ""
+          - profile: minimal
+            fragment: kernel-4.9/configs/a32_minimal.fragment
 
     env:
       A32_KERNEL49_JOBS: "2"
       A32_KERNEL49_VERBOSE: "1"
+      A32_KERNEL49_FRAGMENT: ${{ matrix.fragment }}
 
     steps:
       - name: Checkout A32 OS
@@ -84,7 +94,7 @@ jobs:
         if: steps.kernel.outputs.status != '0'
         shell: bash
         run: |
-          echo "## Linux 4.9 build failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Linux 4.9 ${{ matrix.profile }} build failed" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           printf 'Exit status: `%s`\n' "$(cat target/kernel-4.9/build.status 2>/dev/null || echo unknown)" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
@@ -100,7 +110,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-4.9-diagnostics
+          name: kernel-4.9-${{ matrix.profile }}
           if-no-files-found: ignore
           include-hidden-files: true
           path: |
