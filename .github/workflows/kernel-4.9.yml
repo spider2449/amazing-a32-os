@@ -25,7 +25,6 @@ jobs:
     timeout-minutes: 60
 
     env:
-      A32_CROSS_COMPILE: arm-linux-gnueabihf-
       A32_KERNEL49_JOBS: "2"
       A32_KERNEL49_VERBOSE: "1"
 
@@ -44,11 +43,21 @@ jobs:
             build-essential \
             file \
             flex \
-            gcc-arm-linux-gnueabihf \
             libc6:i386 \
             libc6-i386 \
             libssl-dev \
-            perl
+            perl \
+            python-is-python3
+
+      - name: Fetch Android GCC 4.9 cross toolchain
+        shell: bash
+        run: |
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains/arm-linux-androideabi-4.9"
+          git clone --depth 1 --single-branch --branch lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+            "$TOOLCHAIN"
+          echo "A32_CROSS_COMPILE=$TOOLCHAIN/bin/arm-linux-androideabi-" >> "$GITHUB_ENV"
+          "$TOOLCHAIN/bin/arm-linux-androideabi-gcc" --version | head -n 1
 
       - name: Fetch pinned MediaTek Linux 4.9 tree
         run: bash scripts/prepare-kernel-4.9.sh
