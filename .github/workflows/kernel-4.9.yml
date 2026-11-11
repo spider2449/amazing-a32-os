@@ -59,6 +59,8 @@ jobs:
           bash scripts/build-kernel-4.9.sh
           status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
+          mkdir -p target/kernel-4.9
+          echo "$status" > target/kernel-4.9/build.status
           exit 0
 
       - name: Summarize failure
@@ -67,7 +69,7 @@ jobs:
         run: |
           echo "## Linux 4.9 build failed" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Exit status: `\${{ steps.kernel.outputs.status }}`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Exit status: `$(cat target/kernel-4.9/build.status 2>/dev/null || echo unknown)`" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           if [[ -f target/kernel-4.9/build.log ]]; then
@@ -85,6 +87,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             target/kernel-4.9/build.log
+            target/kernel-4.9/build.status
             target/kernel-4.9/build/.config
             target/kernel-4.9/zImage-dtb
 
