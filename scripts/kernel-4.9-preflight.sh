@@ -121,7 +121,14 @@ fi
 echo
 echo "== bring-up config sanity =="
 if [[ -f "$CONFIG_FILE" ]]; then
-  for symbol in     'CONFIG_MACH_MT6735M=y'     'CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE=y'     'CONFIG_ARCH_MTK_PROJECT="k37mv1_bsp_k49"'     'CONFIG_MMC=y'     'CONFIG_MTK_EMMC_SUPPORT=y'     'CONFIG_EXT4_FS=y'     'CONFIG_TMPFS=y'; do
+  for symbol in \
+    'CONFIG_MACH_MT6735M=y' \
+    'CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE=y' \
+    'CONFIG_ARCH_MTK_PROJECT="k37mv1_bsp_k49"' \
+    'CONFIG_MMC=y' \
+    'CONFIG_MTK_EMMC_SUPPORT=y' \
+    'CONFIG_EXT4_FS=y' \
+    'CONFIG_TMPFS=y'; do
     if grep -Fqx "$symbol" "$CONFIG_FILE"; then
       ok "$symbol"
     else
