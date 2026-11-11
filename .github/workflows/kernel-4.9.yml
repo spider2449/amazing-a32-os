@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: kernel-4.9-bringup
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -51,6 +55,9 @@ jobs:
       - name: Host preflight
         run: bash scripts/kernel-4.9-preflight.sh
 
+      - name: Board hardware audit
+        run: bash scripts/kernel-4.9-board-audit.sh
+
       - name: Build zImage-dtb
         id: kernel
         shell: bash
@@ -69,7 +76,7 @@ jobs:
         run: |
           echo "## Linux 4.9 build failed" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Exit status: `$(cat target/kernel-4.9/build.status 2>/dev/null || echo unknown)`" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Exit status: `%s`\n' "$(cat target/kernel-4.9/build.status 2>/dev/null || echo unknown)" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           if [[ -f target/kernel-4.9/build.log ]]; then
