@@ -4,8 +4,10 @@
 # match the Amazing A32 board.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
+PATCH_DIR="$ROOT/kernel-4.9/patches"
 DEST="${1:-phone-tools/kernel-4.9}"
 REPO="https://github.com/rokibhasansagar/alps-mp-p0.mp2_kernels.git"
 REF="android-4.9"
@@ -29,6 +31,21 @@ actual="$(git -C "$DEST" rev-parse HEAD)"
 if [[ "$actual" != "$COMMIT" ]]; then
   echo "unexpected kernel commit: $actual" >&2
   exit 2
+fi
+
+if compgen -G "$PATCH_DIR/*.patch" >/dev/null; then
+  echo "applying A32 host/build compatibility patches:"
+  for patch in "$PATCH_DIR"/*.patch; do
+    if git -C "$DEST" apply --reverse --check "$patch" >/dev/null 2>&1; then
+      echo "  already applied: $(basename "$patch")"
+    elif git -C "$DEST" apply --check "$patch" >/dev/null 2>&1; then
+      git -C "$DEST" apply "$patch"
+      echo "  applied:         $(basename "$patch")"
+    else
+      echo "patch conflicts with kernel tree: $patch" >&2
+      exit 2
+    fi
+  done
 fi
 
 echo "kernel source: $DEST"
