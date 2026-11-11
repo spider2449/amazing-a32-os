@@ -1,0 +1,52 @@
+# Amazing A32 Linux 4.9 minimal RAM-boot profile.
+#
+# Apply on top of a32_bringup_defconfig. This fragment intentionally only
+# removes unverified k37 peripherals. It does not add new kernel features.
+#
+# Keep for the first milestone:
+#   MT6735M/MT6737 SoC core, timer/IRQ, MTK serial console, eMMC/MMC,
+#   EXT4, proc/sysfs/tmpfs, initramfs and the existing MTK USB gadget path.
+
+# k37 display / GPU: panel and geometry do not match the Amazing A32.
+# CONFIG_MTK_FB is not set
+# CONFIG_MTK_LCM is not set
+# CONFIG_MTK_VIDEOX is not set
+# CONFIG_MTK_GPU_SUPPORT is not set
+
+# k37 touch: Amazing A32 controller model is not yet identified.
+# CONFIG_TOUCHSCREEN_MTK is not set
+# CONFIG_TOUCHSCREEN_MTK_GT1151 is not set
+
+# k37 sensors: known A32 parts are MXC400X + AP3426, absent from this tree.
+# CONFIG_CUSTOM_KERNEL_ACCELEROMETER is not set
+# CONFIG_MTK_MC3410_I2C is not set
+# CONFIG_CUSTOM_KERNEL_ALSPS is not set
+# CONFIG_MTK_CM36652 is not set
+# CONFIG_CUSTOM_KERNEL_GYROSCOPE is not set
+# CONFIG_CUSTOM_KERNEL_MAGNETOMETER is not set
+
+# k37 cameras / ISP: known A32 sensors are GC5025 + GC2385, absent here.
+# CONFIG_MTK_IMGSENSOR is not set
+# CONFIG_MTK_JPEG is not set
+
+# Audio is not required for LK -> Linux -> initramfs -> a32-init.
+# CONFIG_SOUND is not set
+# CONFIG_SND is not set
+# CONFIG_SOUND_PRIME is not set
+# CONFIG_MTK_BTCVSD is not set
+
+# Generic HID is not required for the first phone boot and greatly expands
+# the compile surface. USB gadget serial/ACM remains enabled separately.
+# CONFIG_HID is not set
+# CONFIG_HIDRAW is not set
+
+# Modem / combo / radio are deliberately deferred until board data is known.
+# CONFIG_MTK_MD1_SUPPORT is not set
+# CONFIG_MTK_COMBO is not set
+# CONFIG_MTK_COMBO_BT is not set
+# CONFIG_MTK_COMBO_GPS is not set
+# CONFIG_MTK_COMBO_WIFI is not set
+# CONFIG_MTK_GPS is not set
+# CONFIG_MTK_GPS_SUPPORT is not set
+# CONFIG_MTK_FMRADIO is not set
+# CONFIG_MTK_ECCCI_DRIVER is not set
