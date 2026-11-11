@@ -10,6 +10,7 @@ cd "$ROOT"
 KERNEL_DIR="${A32_KERNEL49_DIR:-$ROOT/phone-tools/kernel-4.9}"
 OUT="${A32_KERNEL49_OUT:-$ROOT/target/kernel-4.9/build}"
 CONFIG_FILE="${A32_KERNEL49_CONFIG:-$ROOT/kernel-4.9/configs/a32_bringup_defconfig}"
+CONFIG_FRAGMENT="${A32_KERNEL49_FRAGMENT:-}"
 CROSS="${A32_CROSS_COMPILE:-arm-linux-gnueabihf-}"
 JOBS="${A32_KERNEL49_JOBS:-}"
 VERBOSE="${A32_KERNEL49_VERBOSE:-0}"
@@ -75,6 +76,11 @@ fi
 echo "kernel:       $KERNEL_DIR" | tee -a "$LOG"
 echo "commit:       $head" | tee -a "$LOG"
 echo "config:       $CONFIG_FILE" | tee -a "$LOG"
+if [[ -n "$CONFIG_FRAGMENT" ]]; then
+  echo "fragment:     $CONFIG_FRAGMENT" | tee -a "$LOG"
+else
+  echo "fragment:     (none)" | tee -a "$LOG"
+fi
 echo "cross gcc:    $(command -v "${CROSS}gcc")" | tee -a "$LOG"
 "${CROSS}gcc" --version | head -n 1 | tee -a "$LOG"
 if command -v file >/dev/null 2>&1; then
@@ -85,15 +91,31 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "kernel config not found: $CONFIG_FILE" >&2
   exit 2
 fi
+if [[ -n "$CONFIG_FRAGMENT" && ! -f "$CONFIG_FRAGMENT" ]]; then
+  echo "kernel config fragment not found: $CONFIG_FRAGMENT" >&2
+  exit 2
+fi
 
 echo | tee -a "$LOG"
 echo "== A32 bring-up config ==" | tee -a "$LOG"
-cp "$CONFIG_FILE" "$OUT/.config"
+if [[ -n "$CONFIG_FRAGMENT" ]]; then
+  KCONFIG_CONFIG="$OUT/.config" \
+    "$KERNEL_DIR/scripts/kconfig/merge_config.sh" -m -O "$OUT" \
+    "$CONFIG_FILE" "$CONFIG_FRAGMENT" 2>&1 | tee -a "$LOG"
+else
+  cp "$CONFIG_FILE" "$OUT/.config"
+fi
 make "${MAKE_ARGS[@]}" olddefconfig 2>&1 | tee -a "$LOG"
 
 echo | tee -a "$LOG"
 echo "== selected ARM / MediaTek settings ==" | tee -a "$LOG"
-grep -E 'CONFIG_(CPU_V7|CPU_32v7|ARCH_MEDIATEK|MACH_MT6735M|MTK_DTBO_FEATURE|BUILD_ARM_APPENDED_DTB_IMAGE|BUILD_ARM_APPENDED_DTB_IMAGE_NAMES|BUILD_ARM_DTB_OVERLAY_IMAGE|BUILD_ARM_DTB_OVERLAY_IMAGE_NAMES|ARCH_MTK_PROJECT)=' "$OUT/.config" | tee -a "$LOG" || true
+grep -E 'CONFIG_(CPU_V7|CPU_32v7|ARCH_MEDIATEK|MACH_MT6735M|MTK_DTBO_FEATURE|BUILD_ARM_APPENDED_DTB_IMAGE|BUILD_ARM_APPENDED_DTB_IMAGE_NAMES|BUILD_ARM_DTB_OVERLAY_IMAGE|BUILD_ARM_DTB_OVERLAY_IMAGE_NAMES|ARCH_MTK_PROJECT|MTK_SERIAL|MMC|MMC_MTK_PRO|MTK_EMMC_SUPPORT|EXT4_FS|USB_GADGET|USB_CONFIGFS_SERIAL|USB_CONFIGFS_ACM)=' "$OUT/.config" | tee -a "$LOG" || true
+
+if [[ -n "$CONFIG_FRAGMENT" ]]; then
+  echo | tee -a "$LOG"
+  echo "== minimal profile should be disabled ==" | tee -a "$LOG"
+  grep -E 'CONFIG_(MTK_FB|MTK_LCM|TOUCHSCREEN_MTK|MTK_IMGSENSOR|SOUND|SND|HID|MTK_COMBO|MTK_ECCCI_DRIVER|MTK_GPU_SUPPORT)=' "$OUT/.config" | tee -a "$LOG" || true
+fi
 
 echo | tee -a "$LOG"
 echo "== compiler ARMv7 probe ==" | tee -a "$LOG"
