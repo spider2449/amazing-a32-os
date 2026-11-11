@@ -1,0 +1,22 @@
+From: Amazing A32 kernel bring-up
+Subject: [PATCH] kernel: do not make GCC string truncation diagnostics fatal
+
+This vendor tree deliberately builds kernel/ with -Werror. Newer GCC versions
+diagnose several long-standing strncpy patterns as -Wstringop-truncation,
+including kernel/power/qos.c and kernel/printk/printk.c. These diagnostics were
+not emitted by the toolchains this 4.9 tree originally targeted.
+
+Keep -Werror for the rest of kernel/, but leave this newer warning class as a
+warning when the compiler supports the option.
+
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -2,6 +2,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+ subdir-ccflags-y += -Werror
++subdir-ccflags-y += $(call cc-option,-Wno-error=stringop-truncation)
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
+ subdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/mtprof
